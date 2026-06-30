@@ -1,5 +1,12 @@
 
 import asyncio
+import os
+import sys
+from pathlib import Path
+
+# همیشه CWD رو به پوشه main.py ست کن
+os.chdir(Path(__file__).parent)
+
 from src.config import Config
 from src.bot import BotHandler
 from src.utils import setup_logger
