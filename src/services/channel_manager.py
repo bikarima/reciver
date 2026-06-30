@@ -519,7 +519,15 @@ class ChannelManager:
                 title = getattr(entity, 'title', '?')
                 
                 try:
-                    await client(LeaveChannelRequest(entity))
+                    if isinstance(entity, Channel):
+                        # کانال یا سوپرگروه — از LeaveChannelRequest استفاده کن
+                        await client(LeaveChannelRequest(entity))
+                    else:
+                        # گروه معمولی (Chat) — از DeleteChatUserRequest استفاده کن
+                        from telethon.tl.functions.messages import DeleteChatUserRequest
+                        me = await client.get_me()
+                        await client(DeleteChatUserRequest(chat_id=entity.id, user_id=me.id))
+                    
                     left += 1
                     logger.info(f"لفت موفق: {title}")
                     await asyncio.sleep(0.8)  # تاخیر کوچک بین هر لفت
