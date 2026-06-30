@@ -465,3 +465,169 @@ class ChannelManager:
                 await asyncio.sleep(delay)
         
         return results
+
+    async def leave_all_channels(self, session_path: str) -> Dict[str, any]:
+        """
+        لفت از تمام کانال‌ها و گروه‌هایی که اکانت عضوشونه
+        
+        Args:
+            session_path: مسیر فایل سشن
+            
+        Returns:
+            دیکشنری حاوی وضعیت، تعداد لفت موفق و ناموفق
+        """
+        from telethon.sessions import StringSession
+        from telethon.tl.types import Channel, Chat
+        
+        client = None
+        
+        try:
+            session_string = Path(session_path).read_text(encoding='utf-8')
+            
+            client = TelegramClient(
+                StringSession(session_string),
+                self.api_id,
+                self.api_hash
+            )
+            
+            await client.connect()
+            
+            if not await client.is_user_authorized():
+                return {
+                    'success': False,
+                    'message': 'سشن نامعتبر است',
+                    'invalid_session': True,
+                    'left': 0,
+                    'failed': 0
+                }
+            
+            left = 0
+            failed = 0
+            skipped = 0
+            
+            # گرفتن همه دیالوگ‌ها
+            dialogs = await client.get_dialogs()
+            
+            for dialog in dialogs:
+                entity = dialog.entity
+                
+                # فقط کانال‌ها و گروه‌ها — چت خصوصی رو رد کن
+                if not isinstance(entity, (Channel, Chat)):
+                    skipped += 1
+                    continue
+                
+                title = getattr(entity, 'title', '?')
+                
+                try:
+                    await client(LeaveChannelRequest(entity))
+                    left += 1
+                    logger.info(f"لفت موفق: {title}")
+                    await asyncio.sleep(0.8)  # تاخیر کوچک بین هر لفت
+                    
+                except errors.UserNotParticipantError:
+                    skipped += 1
+                    
+                except errors.ChatAdminRequiredError:
+                    # ادمین است، نمی‌تونه لفت کنه
+                    failed += 1
+                    logger.warning(f"ادمین کانال است، نمی‌توان لفت کرد: {title}")
+                    
+                except errors.FloodWaitError as e:
+                    logger.warning(f"FloodWait {e.seconds}s در لفت {title}")
+                    await asyncio.sleep(min(e.seconds, 30))
+                    # دوباره تلاش کن
+                    try:
+                        await client(LeaveChannelRequest(entity))
+                        left += 1
+                    except Exception:
+                        failed += 1
+                        
+                except Exception as e:
+                    failed += 1
+                    logger.warning(f"لفت ناموفق {title}: {e}")
+            
+            return {
+                'success': True,
+                'message': f'لفت از {left} کانال/گروه | ناموفق: {failed}',
+                'left': left,
+                'failed': failed,
+                'skipped': skipped
+            }
+            
+        except Exception as e:
+            logger.exception(f"خطا در leave_all_channels: {e}")
+            return {
+                'success': False,
+                'message': f'خطا: {str(e)}',
+                'left': 0,
+                'failed': 0
+            }
+            
+        finally:
+            if client:
+                await client.disconnect()
+    
+    async def bulk_leave_all(self, session_paths: List[str],
+                             progress_callback=None, workers: int = 1,
+                             custom_delay: int = None) -> Dict[str, any]:
+        """
+        لفت دسته‌جمعی از همه کانال‌ها برای چند اکانت
+        
+        Args:
+            session_paths: لیست مسیر فایل‌های سشن
+            progress_callback: تابع callback برای نمایش پیشرفت
+            workers: تعداد اکانت‌های همزمان
+            custom_delay: تاخیر سفارشی بین اکانت‌ها
+            
+        Returns:
+            دیکشنری حاوی نتایج کلی
+        """
+        results = {
+            'success': 0,
+            'failed': 0,
+            'details': [],
+            'total_left': 0
+        }
+        
+        total = len(session_paths)
+        
+        for i in range(0, total, workers):
+            batch = session_paths[i:i + workers]
+            tasks = [self.leave_all_channels(sp) for sp in batch]
+            
+            batch_results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            for j, result in enumerate(batch_results):
+                index = i + j + 1
+                
+                if isinstance(result, Exception):
+                    result = {'success': False, 'message': str(result), 'left': 0, 'failed': 0}
+                
+                if result['success']:
+                    results['success'] += 1
+                    results['total_left'] += result.get('left', 0)
+                else:
+                    results['failed'] += 1
+                
+                results['details'].append({
+                    'session': Path(batch[j]).name,
+                    'result': result
+                })
+                
+                if progress_callback:
+                    left_count = result.get('left', 0)
+                    await progress_callback(
+                        index, total,
+                        f"اکانت {index}/{total} — لفت از {left_count} کانال/گروه"
+                    )
+            
+            if i + workers < total:
+                if custom_delay is not None:
+                    delay = custom_delay
+                else:
+                    delay = Config.DELAY_BETWEEN_ACTIONS + random.randint(0, Config.DELAY_RANDOM_RANGE)
+                
+                logger.info(f"صبر {delay} ثانیه قبل از اکانت بعدی...")
+                await asyncio.sleep(delay)
+        
+        return results

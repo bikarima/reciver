@@ -744,6 +744,7 @@ class BotHandler:
                      Button.inline("📋 اکانت‌های من", b"my_accounts")],
                     [Button.inline("🔗 جوین کانال", b"join_channel"), 
                      Button.inline("🚪 لفت کانال", b"leave_channel")],
+                    [Button.inline("🗑 لفت همه کانال‌ها", b"leave_all_channels")],
                     [Button.inline("🤖 استارت رفرال", b"start_referral"),
                      Button.inline("💬 ارسال پیام", b"send_message")],
                     [Button.inline("❤️ ری‌اکشن و سین", b"react_post"),
@@ -1546,6 +1547,46 @@ class BotHandler:
             )
             self.user_states[event.sender_id] = {'step': 'leave_link'}
         
+        @self.bot.on(events.CallbackQuery(pattern=b"leave_all_channels"))
+        async def leave_all_channels_callback(event):
+            """شروع فرآیند لفت از همه کانال‌ها"""
+            if not await self._check_admin_access(event):
+                return
+            
+            await event.answer()
+            
+            user_id = event.sender_id
+            accounts = await self.db.get_accounts(user_id)
+            active_accounts = [acc for acc in accounts if acc.status == 'active' and acc.session_path]
+            
+            if not active_accounts:
+                await event.edit(
+                    "❌ شما اکانت فعالی ندارید.",
+                    buttons=Button.inline("🔙 منوی اصلی", b"back_to_menu")
+                )
+                return
+            
+            self.user_states[user_id] = {
+                'step': 'scenario_count',
+                'active_accounts': active_accounts,
+                'operation_type': 'leave_all_channels',
+                'selected_country': None,
+                'scenario_summary': "🗑 **عملیات: لفت همه کانال‌ها و گروه‌ها**"
+            }
+            
+            await event.edit(
+                f"🗑 **لفت همه کانال‌ها و گروه‌ها**\n\n"
+                f"⚠️ هر اکانت از **تمام** کانال‌ها و گروه‌هایی که عضوشونه خارج می‌شود.\n"
+                f"(چت‌های خصوصی دست‌نخورده می‌مانند)\n\n"
+                f"📊 اکانت‌های فعال: {len(active_accounts)}\n\n"
+                f"💡 **گزینه‌ها:**\n"
+                f"• عدد بفرست (مثلاً `5`)\n"
+                f"• `/all` - همه اکانت‌ها\n"
+                f"• `/from 70` - از اکانت 70\n"
+                f"• `/from 70 to 100` - از 70 تا 100",
+                buttons=Button.inline("❌ لغو", b"cancel")
+            )
+
         @self.bot.on(events.CallbackQuery(pattern=b"start_referral"))
         async def start_referral_callback(event):
             """شروع فرآیند استارت رفرال"""
@@ -1934,6 +1975,7 @@ class BotHandler:
                      Button.inline("📋 اکانت‌های من", b"my_accounts")],
                     [Button.inline("🔗 جوین کانال", b"join_channel"), 
                      Button.inline("🚪 لفت کانال", b"leave_channel")],
+                    [Button.inline("🗑 لفت همه کانال‌ها", b"leave_all_channels")],
                     [Button.inline("🤖 استارت رفرال", b"start_referral"),
                      Button.inline("💬 ارسال پیام", b"send_message")],
                     [Button.inline("❤️ ری‌اکشن و سین", b"react_post"),
@@ -1952,6 +1994,7 @@ class BotHandler:
                      Button.inline("📋 اکانت‌های من", b"my_accounts")],
                     [Button.inline("🔗 جوین کانال", b"join_channel"), 
                      Button.inline("🚪 لفت کانال", b"leave_channel")],
+                    [Button.inline("🗑 لفت همه کانال‌ها", b"leave_all_channels")],
                     [Button.inline("🤖 استارت رفرال", b"start_referral"),
                      Button.inline("💬 ارسال پیام", b"send_message")],
                     [Button.inline("❤️ ری‌اکشن و سین", b"react_post"),
@@ -4357,6 +4400,17 @@ class BotHandler:
                             btn_retry = "do_view_only"
                             op_log_name = "bulk_view"
                             op_log_detail = f"{state['channel_link']}/{state['message_id']} - {results['success']}/{total}"
+
+                        elif op_type == 'leave_all_channels':
+                            results = await self.channel_manager.bulk_leave_all(
+                                session_paths,
+                                progress_callback=update_progress, workers=workers, custom_delay=custom_delay
+                            )
+                            total_left = results.get('total_left', 0)
+                            results_text = f"📊 **نتایج لفت همه کانال‌ها:**\n\n🗑 کل کانال/گروه لفت شده: {total_left}\n\n"
+                            btn_retry = "leave_all_channels"
+                            op_log_name = "bulk_leave_all"
+                            op_log_detail = f"total_left={total_left} - {results['success']}/{total}"
                             
                         if results:
                             # نمایش جزئیات نتایج
