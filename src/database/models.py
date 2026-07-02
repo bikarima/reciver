@@ -174,6 +174,24 @@ class Database:
                 )
             """)
 
+            # جدول سناریوهای زمانبندی شده
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS scheduled_scenarios (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    name TEXT NOT NULL,
+                    scenario_text TEXT NOT NULL,
+                    account_count TEXT NOT NULL,
+                    workers INTEGER DEFAULT 3,
+                    interval_minutes INTEGER NOT NULL,
+                    is_active INTEGER DEFAULT 1,
+                    next_run_at TIMESTAMP,
+                    last_run_at TIMESTAMP,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES users (user_id)
+                )
+            """)
+
             await db.commit()
             
             # Migration: اضافه کردن ستون added_by اگر وجود نداره
@@ -544,6 +562,103 @@ class Database:
                 return True
         except Exception as e:
             print(f"خطا در ذخیره تنظیمات: {e}")
+            return False
+
+    # ─── Scheduled Scenarios ────────────────────────────────────────────────
+
+    async def add_scheduled_scenario(self, user_id: int, name: str, scenario_text: str,
+                                     account_count: str, workers: int,
+                                     interval_minutes: int) -> Optional[int]:
+        """افزودن سناریو زمانبندی شده جدید"""
+        try:
+            from datetime import datetime, timedelta
+            next_run = (datetime.now() + timedelta(minutes=interval_minutes)).strftime('%Y-%m-%d %H:%M:%S')
+            async with aiosqlite.connect(self.db_path) as db:
+                cursor = await db.execute("""
+                    INSERT INTO scheduled_scenarios
+                    (user_id, name, scenario_text, account_count, workers, interval_minutes, is_active, next_run_at)
+                    VALUES (?, ?, ?, ?, ?, ?, 1, ?)
+                """, (user_id, name, scenario_text, account_count, workers, interval_minutes, next_run))
+                await db.commit()
+                return cursor.lastrowid
+        except Exception as e:
+            print(f"خطا در افزودن سناریو زمانبندی: {e}")
+            return None
+
+    async def get_scheduled_scenario(self, schedule_id: int) -> Optional[Dict[str, Any]]:
+        """دریافت سناریو زمانبندی شده با ID"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM scheduled_scenarios WHERE id = ?", (schedule_id,)
+            ) as cursor:
+                row = await cursor.fetchone()
+                return dict(row) if row else None
+
+    async def get_user_scheduled_scenarios(self, user_id: int) -> List[Dict[str, Any]]:
+        """دریافت لیست سناریوهای زمانبندی شده کاربر"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM scheduled_scenarios WHERE user_id = ? ORDER BY created_at DESC",
+                (user_id,)
+            ) as cursor:
+                rows = await cursor.fetchall()
+                return [dict(r) for r in rows]
+
+    async def get_all_active_scheduled_scenarios(self) -> List[Dict[str, Any]]:
+        """دریافت همه سناریوهای فعال (برای بازیابی بعد از restart)"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM scheduled_scenarios WHERE is_active = 1"
+            ) as cursor:
+                rows = await cursor.fetchall()
+                return [dict(r) for r in rows]
+
+    async def update_scheduled_last_run(self, schedule_id: int, interval_minutes: int) -> bool:
+        """بروزرسانی زمان آخرین اجرا و زمان اجرای بعدی"""
+        try:
+            from datetime import datetime, timedelta
+            now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            next_run = (datetime.now() + timedelta(minutes=interval_minutes)).strftime('%Y-%m-%d %H:%M:%S')
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute("""
+                    UPDATE scheduled_scenarios
+                    SET last_run_at = ?, next_run_at = ?
+                    WHERE id = ?
+                """, (now, next_run, schedule_id))
+                await db.commit()
+                return True
+        except Exception as e:
+            print(f"خطا در بروزرسانی آخرین اجرا: {e}")
+            return False
+
+    async def deactivate_scheduled_scenario(self, schedule_id: int) -> bool:
+        """غیرفعال کردن سناریو زمانبندی شده"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute(
+                    "UPDATE scheduled_scenarios SET is_active = 0 WHERE id = ?",
+                    (schedule_id,)
+                )
+                await db.commit()
+                return True
+        except Exception as e:
+            print(f"خطا در غیرفعال کردن سناریو: {e}")
+            return False
+
+    async def delete_scheduled_scenario(self, schedule_id: int) -> bool:
+        """حذف کامل سناریو زمانبندی شده"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute(
+                    "DELETE FROM scheduled_scenarios WHERE id = ?", (schedule_id,)
+                )
+                await db.commit()
+                return True
+        except Exception as e:
+            print(f"خطا در حذف سناریو: {e}")
             return False
 
     async def save_scenario_progress(self, user_id: int, scenario_text: str, 

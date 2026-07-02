@@ -45,6 +45,9 @@ class BotHandler:
         
         # قفل سشن‌ها - برای جلوگیری از استفاده همزمان از یک سشن
         self.session_locks = set()  # مجموعه session_path های در حال استفاده
+
+        # سناریوهای زمانبندی شده: schedule_id → asyncio.Task
+        self.scheduled_tasks: dict = {}
     
     async def _handle_invalid_session(self, session_path: str, account=None):
         """
@@ -632,6 +635,109 @@ class BotHandler:
             if user_id in self.running_operations:
                 del self.running_operations[user_id]
     
+    async def _run_scheduled_scenario(self, schedule_id: int):
+        """
+        حلقه اجرای سناریو زمانبندی شده — تا زمانی که is_active باشه تکرار میشه
+        """
+        logger.info(f"شروع سناریو زمانبندی شده #{schedule_id}")
+        
+        while True:
+            try:
+                row = await self.db.get_scheduled_scenario(schedule_id)
+                if not row or not row['is_active']:
+                    logger.info(f"سناریو زمانبندی #{schedule_id} غیرفعال شد، متوقف می‌شود")
+                    break
+                
+                user_id = row['user_id']
+                scenario_text = row['scenario_text']
+                account_count_str = row['account_count']
+                workers = row['workers']
+                interval_minutes = row['interval_minutes']
+                name = row['name']
+                
+                logger.info(f"اجرای سناریو زمانبندی #{schedule_id} '{name}' برای user {user_id}")
+                
+                # دریافت اکانت‌های فعال
+                accounts = await self.db.get_accounts(user_id)
+                active_accounts = [a for a in accounts if a.status == 'active' and a.session_path]
+                
+                if not active_accounts:
+                    logger.warning(f"سناریو زمانبندی #{schedule_id}: هیچ اکانت فعالی نیست")
+                else:
+                    # انتخاب اکانت‌ها بر اساس account_count
+                    try:
+                        selected = self._select_accounts(account_count_str, active_accounts)
+                    except Exception:
+                        selected = active_accounts
+                    
+                    # اجرای سناریو
+                    try:
+                        lines = scenario_text.split('\n')
+                        bot_count = sum(1 for line in lines if line.strip().startswith('@'))
+                        
+                        if bot_count > 1:
+                            bots_scenarios = self.bot_automation.parse_multi_bot_scenario(scenario_text)
+                        else:
+                            first_line = next((l.strip() for l in lines if l.strip().startswith('@')), '')
+                            bot_username = first_line.lstrip('@')
+                            scenario_lines = [l for l in lines if not l.strip().startswith('@')]
+                            parsed_scenario = self.bot_automation.parse_scenario('\n'.join(scenario_lines))
+                            bots_scenarios = [{'bot_username': bot_username, 'scenario': parsed_scenario}]
+                        
+                        success_count = 0
+                        fail_count = 0
+                        
+                        for account in selected:
+                            for bot_data in bots_scenarios:
+                                try:
+                                    result = await self.bot_automation.execute_scenario(
+                                        account.session_path,
+                                        bot_data['bot_username'],
+                                        bot_data['scenario'],
+                                        db=self.db
+                                    )
+                                    if result.get('success'):
+                                        success_count += 1
+                                    else:
+                                        fail_count += 1
+                                except Exception as e:
+                                    fail_count += 1
+                                    logger.error(f"خطا در اجرای scheduled scenario #{schedule_id}: {e}")
+                            
+                            await asyncio.sleep(2)  # تاخیر کوچک بین اکانت‌ها
+                        
+                        # اطلاع‌رسانی به کاربر
+                        try:
+                            from datetime import datetime
+                            now_str = datetime.now().strftime('%H:%M:%S')
+                            await self.bot.send_message(
+                                user_id,
+                                f"⏰ **سناریو زمانبندی اجرا شد**\n\n"
+                                f"📌 نام: {name}\n"
+                                f"🕐 زمان: {now_str}\n"
+                                f"✅ موفق: {success_count}\n"
+                                f"❌ ناموفق: {fail_count}\n"
+                                f"⏳ اجرای بعدی: {interval_minutes} دقیقه دیگر"
+                            )
+                        except Exception:
+                            pass
+                        
+                        await self.db.update_scheduled_last_run(schedule_id, interval_minutes)
+                        logger.info(f"سناریو زمانبندی #{schedule_id} اجرا شد: {success_count} موفق، {fail_count} ناموفق")
+                        
+                    except Exception as e:
+                        logger.error(f"خطا در اجرای سناریو زمانبندی #{schedule_id}: {e}")
+                
+                # صبر تا اجرای بعدی
+                await asyncio.sleep(interval_minutes * 60)
+                
+            except asyncio.CancelledError:
+                logger.info(f"سناریو زمانبندی #{schedule_id} لغو شد")
+                break
+            except Exception as e:
+                logger.error(f"خطا در حلقه scheduled #{schedule_id}: {e}")
+                await asyncio.sleep(60)  # یه دقیقه صبر و دوباره تلاش
+
     async def start(self):
         """راه‌اندازی ربات"""
         # راه‌اندازی دیتابیس
@@ -653,6 +759,17 @@ class BotHandler:
         await self.bot.start(bot_token=Config.BOT_TOKEN)
         
         logger.info("ربات راه‌اندازی شد")
+        
+        # بازیابی سناریوهای زمانبندی شده فعال بعد از restart
+        try:
+            active_schedules = await self.db.get_all_active_scheduled_scenarios()
+            for sched in active_schedules:
+                sid = sched['id']
+                task = asyncio.create_task(self._run_scheduled_scenario(sid))
+                self.scheduled_tasks[sid] = task
+                logger.info(f"سناریو زمانبندی #{sid} '{sched['name']}' بازیابی شد")
+        except Exception as e:
+            logger.error(f"خطا در بازیابی سناریوهای زمانبندی: {e}")
         
         # ثبت هندلرها
         self._register_handlers()
@@ -751,7 +868,8 @@ class BotHandler:
                      Button.inline("🚫 بلاک/انبلاک", b"block_user")],
                     [Button.inline("🎯 سناریو پیشرفته", b"advanced_scenario"),
                      Button.inline("👥 لیچر", b"leecher")],
-                    [Button.inline("🎨 اعمال پروفایل", b"apply_profiles")],
+                    [Button.inline("⏰ سناریو زمانبندی", b"scheduled_scenario"),
+                     Button.inline("🎨 اعمال پروفایل", b"apply_profiles")],
                     [Button.inline("📝 یادداشت‌های من", b"my_notes")],
                     [Button.inline("⚙️ مدیریت ربات", b"bot_management")],
                     [Button.inline("👑 پنل ادمین", b"admin_panel")]
@@ -769,7 +887,8 @@ class BotHandler:
                     "💬 **ارسال پیام** - ارسال پیام به کاربر\n"
                     "❤️ **ری‌اکشن و سین** - ری‌اکشن و سین زدن پست‌ها\n"
                     "🚫 **بلاک/انبلاک** - بلاک یا انبلاک کردن کاربر\n"
-                    "🎯 **سناریو پیشرفته** - اجرای سناریوهای پیچیده\n\n"
+                    "🎯 **سناریو پیشرفته** - اجرای سناریوهای پیچیده\n"
+                    "⏰ **سناریو زمانبندی** - اجرای خودکار هر N دقیقه\n\n"
                     "از منوی زیر استفاده کنید:"
                 )
             elif is_admin:
@@ -785,7 +904,8 @@ class BotHandler:
                      Button.inline("🚫 بلاک/انبلاک", b"block_user")],
                     [Button.inline("🎯 سناریو پیشرفته", b"advanced_scenario"),
                      Button.inline("👥 لیچر", b"leecher")],
-                    [Button.inline("🎨 اعمال پروفایل", b"apply_profiles")],
+                    [Button.inline("⏰ سناریو زمانبندی", b"scheduled_scenario"),
+                     Button.inline("🎨 اعمال پروفایل", b"apply_profiles")],
                     [Button.inline("📝 یادداشت‌های من", b"my_notes")],
                     [Button.inline("⚙️ مدیریت ربات", b"bot_management")],
                     [Button.inline("👑 پنل ادمین", b"admin_panel")]
@@ -804,6 +924,7 @@ class BotHandler:
                     "❤️ **ری‌اکشن و سین** - ری‌اکشن و سین زدن پست‌ها\n"
                     "🚫 **بلاک/انبلاک** - بلاک یا انبلاک کردن کاربر\n"
                     "🎯 **سناریو پیشرفته** - اجرای سناریوهای پیچیده\n"
+                    "⏰ **سناریو زمانبندی** - اجرای خودکار هر N دقیقه\n"
                     "📝 **یادداشت‌ها** - ثبت یادداشت برای رباتها\n\n"
                     "از منوی زیر استفاده کنید:"
                 )
@@ -1982,7 +2103,8 @@ class BotHandler:
                      Button.inline("🚫 بلاک/انبلاک", b"block_user")],
                     [Button.inline("🎯 سناریو پیشرفته", b"advanced_scenario"),
                      Button.inline("👥 لیچر", b"leecher")],
-                    [Button.inline("🎨 اعمال پروفایل", b"apply_profiles")],
+                    [Button.inline("⏰ سناریو زمانبندی", b"scheduled_scenario"),
+                     Button.inline("🎨 اعمال پروفایل", b"apply_profiles")],
                     [Button.inline("📝 یادداشت‌های من", b"my_notes")],
                     [Button.inline("⚙️ مدیریت ربات", b"bot_management")],
                     [Button.inline("👑 پنل ادمین", b"admin_panel")]
@@ -2001,7 +2123,8 @@ class BotHandler:
                      Button.inline("🚫 بلاک/انبلاک", b"block_user")],
                     [Button.inline("🎯 سناریو پیشرفته", b"advanced_scenario"),
                      Button.inline("👥 لیچر", b"leecher")],
-                    [Button.inline("🎨 اعمال پروفایل", b"apply_profiles")],
+                    [Button.inline("⏰ سناریو زمانبندی", b"scheduled_scenario"),
+                     Button.inline("🎨 اعمال پروفایل", b"apply_profiles")],
                     [Button.inline("📝 یادداشت‌های من", b"my_notes")],
                     [Button.inline("⚙️ مدیریت ربات", b"bot_management")],
                     [Button.inline("👑 پنل ادمین", b"admin_panel")]
@@ -3837,6 +3960,115 @@ class BotHandler:
                 
                 del self.user_states[user_id]
             
+            # ─── Scheduled Scenario Steps ────────────────────────────────────
+            elif step == 'sched_name':
+                name = event.message.text.strip()
+                if not name:
+                    await event.respond("❌ نام نمی‌تواند خالی باشد.", buttons=Button.inline("❌ لغو", b"cancel"))
+                    return
+                state['sched_name'] = name
+                state['step'] = 'sched_scenario'
+                await event.respond(
+                    f"⏰ **سناریو زمانبندی — مرحله ۲/۴**\n\n"
+                    f"📌 نام: {name}\n\n"
+                    f"متن سناریو را ارسال کن (همان فرمت سناریو پیشرفته):\n\n"
+                    f"مثال:\n"
+                    f"`@mybot\nstart: ref123\nclick: #0`",
+                    buttons=Button.inline("❌ لغو", b"cancel")
+                )
+
+            elif step == 'sched_scenario':
+                scenario_text = event.message.text.strip()
+                lines = scenario_text.split('\n')
+                bot_count = sum(1 for line in lines if line.strip().startswith('@'))
+                if bot_count == 0:
+                    await event.respond(
+                        "❌ سناریو باید با یوزرنیم ربات شروع شود! (مثال: @bot_name)",
+                        buttons=Button.inline("❌ لغو", b"cancel")
+                    )
+                    return
+                state['sched_scenario'] = scenario_text
+                state['step'] = 'sched_count'
+                
+                accounts = await self.db.get_accounts(user_id)
+                active_accounts = [acc for acc in accounts if acc.status == 'active' and acc.session_path]
+                state['active_accounts'] = active_accounts
+                
+                await event.respond(
+                    f"⏰ **سناریو زمانبندی — مرحله ۳/۴**\n\n"
+                    f"📊 اکانت‌های فعال: {len(active_accounts)}\n\n"
+                    f"چند اکانت هر بار استفاده شود؟\n"
+                    f"• عدد (مثلاً `10`)\n"
+                    f"• `/all` — همه اکانت‌ها",
+                    buttons=Button.inline("❌ لغو", b"cancel")
+                )
+
+            elif step == 'sched_count':
+                count_input = event.message.text.strip()
+                active_accounts = state.get('active_accounts', [])
+                try:
+                    selected = self._select_accounts(count_input, active_accounts)
+                except ValueError as e:
+                    await event.respond(f"❌ {e}", buttons=Button.inline("❌ لغو", b"cancel"))
+                    return
+                state['sched_count'] = count_input
+                state['step'] = 'sched_interval'
+                await event.respond(
+                    f"⏰ **سناریو زمانبندی — مرحله ۴/۴**\n\n"
+                    f"📊 تعداد اکانت هر بار: {len(selected)}\n\n"
+                    f"هر چند دقیقه اجرا شود؟\n"
+                    f"• عدد دقیقه (مثلاً `50` یا `120`)",
+                    buttons=Button.inline("❌ لغو", b"cancel")
+                )
+
+            elif step == 'sched_interval':
+                try:
+                    interval = int(event.message.text.strip())
+                    if interval < 1:
+                        raise ValueError("حداقل 1 دقیقه")
+                except ValueError:
+                    await event.respond("❌ یک عدد معتبر (دقیقه) ارسال کنید.", buttons=Button.inline("❌ لغو", b"cancel"))
+                    return
+                
+                name = state['sched_name']
+                scenario_text = state['sched_scenario']
+                account_count = state['sched_count']
+                
+                # ذخیره در DB
+                schedule_id = await self.db.add_scheduled_scenario(
+                    user_id=user_id,
+                    name=name,
+                    scenario_text=scenario_text,
+                    account_count=account_count,
+                    workers=3,
+                    interval_minutes=interval
+                )
+                
+                if schedule_id:
+                    # شروع task
+                    task = asyncio.create_task(self._run_scheduled_scenario(schedule_id))
+                    self.scheduled_tasks[schedule_id] = task
+                    
+                    await event.respond(
+                        f"✅ **سناریو زمانبندی ثبت شد!**\n\n"
+                        f"📌 نام: {name}\n"
+                        f"⏰ تکرار: هر {interval} دقیقه\n"
+                        f"👥 اکانت‌ها: {account_count}\n"
+                        f"🆔 شناسه: #{schedule_id}\n\n"
+                        f"سناریو اولین بار {interval} دقیقه دیگر اجرا می‌شود.",
+                        buttons=[
+                            [Button.inline("⏰ سناریو زمانبندی", b"scheduled_scenario")],
+                            [Button.inline("🔙 منوی اصلی", b"back_to_menu")]
+                        ]
+                    )
+                else:
+                    await event.respond(
+                        "❌ خطا در ذخیره سناریو.",
+                        buttons=Button.inline("🔙 منوی اصلی", b"back_to_menu")
+                    )
+                
+                del self.user_states[user_id]
+
             elif step == 'scenario_input':
                 # دریافت سناریو
                 scenario_text = event.message.text.strip()
@@ -5585,6 +5817,126 @@ class BotHandler:
             )
             self.user_states[event.sender_id] = {'step': 'scenario_input'}
         
+        @self.bot.on(events.CallbackQuery(pattern=b"scheduled_scenario"))
+        async def scheduled_scenario_callback(event):
+            """منوی سناریو زمانبندی شده"""
+            if not await self._check_admin_access(event):
+                return
+            await event.answer()
+            user_id = event.sender_id
+            
+            schedules = await self.db.get_user_scheduled_scenarios(user_id)
+            active = [s for s in schedules if s['is_active']]
+            
+            text = "⏰ **سناریو زمانبندی شده**\n\n"
+            text += "سناریوی دلخواه رو یک بار تعریف کن و بگو هر چند دقیقه تکرار بشه.\n\n"
+            
+            if active:
+                text += f"📋 **سناریوهای فعال: {len(active)}**\n\n"
+                for s in active[:5]:
+                    text += f"• `#{s['id']}` **{s['name']}** — هر {s['interval_minutes']} دقیقه\n"
+                    if s['last_run_at']:
+                        text += f"  آخرین اجرا: {s['last_run_at'][:16]}\n"
+            else:
+                text += "هیچ سناریوی فعالی ندارید.\n"
+            
+            buttons = [
+                [Button.inline("➕ سناریو جدید", b"add_scheduled_scenario")],
+            ]
+            if active:
+                buttons.append([Button.inline("📋 مدیریت سناریوها", b"manage_schedules")])
+            buttons.append([Button.inline("🔙 منوی اصلی", b"back_to_menu")])
+            
+            await event.edit(text, buttons=buttons)
+
+        @self.bot.on(events.CallbackQuery(pattern=b"add_scheduled_scenario"))
+        async def add_scheduled_scenario_callback(event):
+            """شروع فرآیند افزودن سناریو زمانبندی"""
+            if not await self._check_admin_access(event):
+                return
+            await event.answer()
+            user_id = event.sender_id
+            
+            await event.edit(
+                "⏰ **سناریو زمانبندی جدید — مرحله ۱/۴**\n\n"
+                "یک نام برای این سناریو بنویس:\n"
+                "(مثلاً: رفرال روزانه، استارت شبانه)",
+                buttons=Button.inline("❌ لغو", b"cancel")
+            )
+            self.user_states[user_id] = {'step': 'sched_name'}
+
+        @self.bot.on(events.CallbackQuery(pattern=b"manage_schedules"))
+        async def manage_schedules_callback(event):
+            """مدیریت سناریوهای زمانبندی"""
+            if not await self._check_admin_access(event):
+                return
+            await event.answer()
+            user_id = event.sender_id
+            
+            schedules = await self.db.get_user_scheduled_scenarios(user_id)
+            if not schedules:
+                await event.edit(
+                    "📋 هیچ سناریویی ندارید.",
+                    buttons=Button.inline("🔙 برگشت", b"scheduled_scenario")
+                )
+                return
+            
+            text = "📋 **مدیریت سناریوهای زمانبندی**\n\n"
+            buttons = []
+            for s in schedules:
+                status = "✅" if s['is_active'] else "⏹"
+                text += f"{status} `#{s['id']}` **{s['name']}** — هر {s['interval_minutes']} دقیقه\n"
+                if s['is_active']:
+                    buttons.append([
+                        Button.inline(f"⏹ توقف #{s['id']} ({s['name']})", f"stop_sched_{s['id']}".encode())
+                    ])
+                buttons.append([
+                    Button.inline(f"🗑 حذف #{s['id']} ({s['name']})", f"del_sched_{s['id']}".encode())
+                ])
+            
+            buttons.append([Button.inline("🔙 برگشت", b"scheduled_scenario")])
+            await event.edit(text, buttons=buttons)
+
+        @self.bot.on(events.CallbackQuery(pattern=rb"stop_sched_(\d+)"))
+        async def stop_schedule_callback(event):
+            """توقف سناریو زمانبندی"""
+            if not await self._check_admin_access(event):
+                return
+            await event.answer()
+            schedule_id = int(event.pattern_match.group(1))
+            
+            await self.db.deactivate_scheduled_scenario(schedule_id)
+            
+            # لغو task در حال اجرا
+            task = self.scheduled_tasks.pop(schedule_id, None)
+            if task:
+                task.cancel()
+            
+            await event.edit(
+                f"⏹ **سناریو #{schedule_id} متوقف شد.**",
+                buttons=Button.inline("🔙 برگشت", b"manage_schedules")
+            )
+
+        @self.bot.on(events.CallbackQuery(pattern=rb"del_sched_(\d+)"))
+        async def delete_schedule_callback(event):
+            """حذف سناریو زمانبندی"""
+            if not await self._check_admin_access(event):
+                return
+            await event.answer()
+            schedule_id = int(event.pattern_match.group(1))
+            
+            # لغو task در حال اجرا
+            task = self.scheduled_tasks.pop(schedule_id, None)
+            if task:
+                task.cancel()
+            
+            await self.db.delete_scheduled_scenario(schedule_id)
+            
+            await event.edit(
+                f"🗑 **سناریو #{schedule_id} حذف شد.**",
+                buttons=Button.inline("🔙 برگشت", b"manage_schedules")
+            )
+
         @self.bot.on(events.CallbackQuery(pattern=b"leecher"))
         async def leecher_callback(event):
             """شروع فرآیند لیچر"""
