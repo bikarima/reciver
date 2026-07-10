@@ -868,8 +868,8 @@ class BotHandler:
                      Button.inline("🚫 بلاک/انبلاک", b"block_user")],
                     [Button.inline("🎯 سناریو پیشرفته", b"advanced_scenario"),
                      Button.inline("👥 لیچر", b"leecher")],
-                    [Button.inline("⏰ سناریو زمانبندی", b"scheduled_scenario"),
-                     Button.inline("🎨 اعمال پروفایل", b"apply_profiles")],
+                    [Button.inline("🎨 اعمال پروفایل", b"apply_profiles")],
+                    [Button.inline("🐱 پیشی", b"pishi_menu")],
                     [Button.inline("📝 یادداشت‌های من", b"my_notes")],
                     [Button.inline("⚙️ مدیریت ربات", b"bot_management")],
                     [Button.inline("👑 پنل ادمین", b"admin_panel")]
@@ -888,7 +888,7 @@ class BotHandler:
                     "❤️ **ری‌اکشن و سین** - ری‌اکشن و سین زدن پست‌ها\n"
                     "🚫 **بلاک/انبلاک** - بلاک یا انبلاک کردن کاربر\n"
                     "🎯 **سناریو پیشرفته** - اجرای سناریوهای پیچیده\n"
-                    "⏰ **سناریو زمانبندی** - اجرای خودکار هر N دقیقه\n\n"
+                    "🐱 **پیشی** - مدیریت ربات پیشی\n\n"
                     "از منوی زیر استفاده کنید:"
                 )
             elif is_admin:
@@ -904,8 +904,8 @@ class BotHandler:
                      Button.inline("🚫 بلاک/انبلاک", b"block_user")],
                     [Button.inline("🎯 سناریو پیشرفته", b"advanced_scenario"),
                      Button.inline("👥 لیچر", b"leecher")],
-                    [Button.inline("⏰ سناریو زمانبندی", b"scheduled_scenario"),
-                     Button.inline("🎨 اعمال پروفایل", b"apply_profiles")],
+                    [Button.inline("🎨 اعمال پروفایل", b"apply_profiles")],
+                    [Button.inline("🐱 پیشی", b"pishi_menu")],
                     [Button.inline("📝 یادداشت‌های من", b"my_notes")],
                     [Button.inline("⚙️ مدیریت ربات", b"bot_management")],
                     [Button.inline("👑 پنل ادمین", b"admin_panel")]
@@ -924,7 +924,7 @@ class BotHandler:
                     "❤️ **ری‌اکشن و سین** - ری‌اکشن و سین زدن پست‌ها\n"
                     "🚫 **بلاک/انبلاک** - بلاک یا انبلاک کردن کاربر\n"
                     "🎯 **سناریو پیشرفته** - اجرای سناریوهای پیچیده\n"
-                    "⏰ **سناریو زمانبندی** - اجرای خودکار هر N دقیقه\n"
+                    "🐱 **پیشی** - مدیریت ربات پیشی\n"
                     "📝 **یادداشت‌ها** - ثبت یادداشت برای رباتها\n\n"
                     "از منوی زیر استفاده کنید:"
                 )
@@ -1708,6 +1708,64 @@ class BotHandler:
                 buttons=Button.inline("❌ لغو", b"cancel")
             )
 
+        @self.bot.on(events.CallbackQuery(pattern=b"pishi_menu"))
+        async def pishi_menu_callback(event):
+            """منوی پیشی"""
+            if not await self._check_admin_access(event):
+                return
+            await event.answer()
+
+            await event.edit(
+                "🐱 **پیشی**\n\n"
+                "از این بخش می‌توانید عملیات مربوط به ربات پیشی را مدیریت کنید.",
+                buttons=[
+                    [Button.inline("⏰ سناریو زمانبندی", b"scheduled_scenario")],
+                    [Button.inline("🐟 ماهی انتقال موجودی", b"pishi_transfer")],
+                    [Button.inline("🗑 خالی کردن پیشی", b"pishi_empty")],
+                    [Button.inline("⬆️ ارتقا دادن پیشی", b"pishi_upgrade")],
+                    [Button.inline("🔙 منوی اصلی", b"back_to_menu")]
+                ]
+            )
+
+        @self.bot.on(events.CallbackQuery(pattern=b"pishi_transfer"))
+        async def pishi_transfer_callback(event):
+            """ماهی انتقال موجودی"""
+            if not await self._check_admin_access(event):
+                return
+            await event.answer()
+            await event.edit(
+                "🐟 **ماهی انتقال موجودی**\n\n"
+                "🚧 این قابلیت به زودی اضافه می‌شود.\n\n"
+                "برای تعریف این قابلیت با سازنده صحبت کنید.",
+                buttons=Button.inline("🔙 برگشت", b"pishi_menu")
+            )
+
+        @self.bot.on(events.CallbackQuery(pattern=b"pishi_empty"))
+        async def pishi_empty_callback(event):
+            """خالی کردن پیشی"""
+            if not await self._check_admin_access(event):
+                return
+            await event.answer()
+            await event.edit(
+                "🗑 **خالی کردن پیشی**\n\n"
+                "🚧 این قابلیت به زودی اضافه می‌شود.\n\n"
+                "برای تعریف این قابلیت با سازنده صحبت کنید.",
+                buttons=Button.inline("🔙 برگشت", b"pishi_menu")
+            )
+
+        @self.bot.on(events.CallbackQuery(pattern=b"pishi_upgrade"))
+        async def pishi_upgrade_callback(event):
+            """ارتقا دادن پیشی"""
+            if not await self._check_admin_access(event):
+                return
+            await event.answer()
+            await event.edit(
+                "⬆️ **ارتقا دادن پیشی**\n\n"
+                "🚧 این قابلیت به زودی اضافه می‌شود.\n\n"
+                "برای تعریف این قابلیت با سازنده صحبت کنید.",
+                buttons=Button.inline("🔙 برگشت", b"pishi_menu")
+            )
+
         @self.bot.on(events.CallbackQuery(pattern=b"start_referral"))
         async def start_referral_callback(event):
             """شروع فرآیند استارت رفرال"""
@@ -2103,8 +2161,8 @@ class BotHandler:
                      Button.inline("🚫 بلاک/انبلاک", b"block_user")],
                     [Button.inline("🎯 سناریو پیشرفته", b"advanced_scenario"),
                      Button.inline("👥 لیچر", b"leecher")],
-                    [Button.inline("⏰ سناریو زمانبندی", b"scheduled_scenario"),
-                     Button.inline("🎨 اعمال پروفایل", b"apply_profiles")],
+                    [Button.inline("🎨 اعمال پروفایل", b"apply_profiles")],
+                    [Button.inline("🐱 پیشی", b"pishi_menu")],
                     [Button.inline("📝 یادداشت‌های من", b"my_notes")],
                     [Button.inline("⚙️ مدیریت ربات", b"bot_management")],
                     [Button.inline("👑 پنل ادمین", b"admin_panel")]
@@ -2123,8 +2181,8 @@ class BotHandler:
                      Button.inline("🚫 بلاک/انبلاک", b"block_user")],
                     [Button.inline("🎯 سناریو پیشرفته", b"advanced_scenario"),
                      Button.inline("👥 لیچر", b"leecher")],
-                    [Button.inline("⏰ سناریو زمانبندی", b"scheduled_scenario"),
-                     Button.inline("🎨 اعمال پروفایل", b"apply_profiles")],
+                    [Button.inline("🎨 اعمال پروفایل", b"apply_profiles")],
+                    [Button.inline("🐱 پیشی", b"pishi_menu")],
                     [Button.inline("📝 یادداشت‌های من", b"my_notes")],
                     [Button.inline("⚙️ مدیریت ربات", b"bot_management")],
                     [Button.inline("👑 پنل ادمین", b"admin_panel")]
