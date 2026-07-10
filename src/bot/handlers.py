@@ -10,6 +10,7 @@ from telethon.tl.custom import Button
 
 from src.config import Config
 from src.services import AccountReceiver, ChannelManager, ReferralManager, MessageSender, BotAutomation, BackupManager, ReactionManager, BlockManager, NoteManager
+from src.services.pishi_service import PishiService
 from src.models import AccountCredentials
 from src.database import Database, User, Account
 from src.utils.validators import extract_telegram_code
@@ -36,6 +37,7 @@ class BotHandler:
         self.block_manager = BlockManager()
         self.db = Database(Config.DATABASE_PATH)
         self.note_manager = NoteManager(self.db)
+        self.pishi_service = PishiService()
         
         # ذخیره وضعیت کاربران
         self.user_states = {}
@@ -1734,10 +1736,27 @@ class BotHandler:
             if not await self._check_admin_access(event):
                 return
             await event.answer()
+            user_id = event.sender_id
+
+            accounts = await self.db.get_accounts(user_id)
+            active_accounts = [acc for acc in accounts if acc.status == 'active' and acc.session_path]
+
+            if not active_accounts:
+                await event.edit(
+                    "❌ اکانت فعالی ندارید.",
+                    buttons=Button.inline("🔙 برگشت", b"pishi_menu")
+                )
+                return
+
+            self.user_states[user_id] = {
+                'step': 'pishi_transfer_group',
+                'active_accounts': active_accounts,
+            }
             await event.edit(
-                "💰 **انتقال موجودی**\n\n"
-                "🚧 این قابلیت به زودی اضافه می‌شود.",
-                buttons=Button.inline("🔙 برگشت", b"pishi_menu")
+                "💰 **انتقال موجودی میویی — مرحله ۱/۳**\n\n"
+                "آیدی یا لینک گروه را ارسال کنید:\n\n"
+                "مثال: `@meavmeacv` یا `https://t.me/meavmeacv`",
+                buttons=Button.inline("❌ لغو", b"cancel")
             )
 
         @self.bot.on(events.CallbackQuery(pattern=b"pishi_fish"))
@@ -4030,6 +4049,157 @@ class BotHandler:
                 
                 del self.user_states[user_id]
             
+            # ─── Pishi Transfer Steps ─────────────────────────────────────────
+            elif step == 'pishi_transfer_group':
+                group_input = event.message.text.strip()
+                # normalize
+                if group_input.startswith('https://t.me/'):
+                    group_input = '@' + group_input.split('t.me/')[-1].split('/')[0]
+                elif not group_input.startswith('@'):
+                    group_input = '@' + group_input.lstrip('@')
+
+                state['pishi_group'] = group_input
+                state['step'] = 'pishi_transfer_link'
+                await event.respond(
+                    f"💰 **انتقال موجودی — مرحله ۲/۳**\n\n"
+                    f"📢 گروه: `{group_input}`\n\n"
+                    f"لینک پیام کسی که می‌خواید موجودی بهش منتقل بشه:\n\n"
+                    f"مثال: `https://t.me/meavmeacv/113309`",
+                    buttons=Button.inline("❌ لغو", b"cancel")
+                )
+
+            elif step == 'pishi_transfer_link':
+                from src.services.pishi_service import parse_message_link
+                link = event.message.text.strip()
+                group_from_link, msg_id = parse_message_link(link)
+
+                if not msg_id:
+                    await event.respond(
+                        "❌ لینک نامعتبر است!\n\n"
+                        "فرمت صحیح: `https://t.me/channel/12345`",
+                        buttons=Button.inline("❌ لغو", b"cancel")
+                    )
+                    return
+
+                state['pishi_target_msg_id'] = msg_id
+                state['pishi_target_link'] = link
+                state['step'] = 'pishi_transfer_count'
+
+                active_accounts = state.get('active_accounts', [])
+                await event.respond(
+                    f"💰 **انتقال موجودی — مرحله ۳/۳**\n\n"
+                    f"📢 گروه: `{state['pishi_group']}`\n"
+                    f"🔗 پیام target: `{link}`\n\n"
+                    f"📊 اکانت‌های فعال: {len(active_accounts)}\n\n"
+                    f"چند اکانت انتقال بدن؟\n"
+                    f"• عدد (مثلاً `5`) یا `/all`",
+                    buttons=Button.inline("❌ لغو", b"cancel")
+                )
+
+            elif step == 'pishi_transfer_count':
+                count_input = event.message.text.strip()
+                active_accounts = state.get('active_accounts', [])
+
+                try:
+                    selected = self._select_accounts(count_input, active_accounts)
+                except ValueError as e:
+                    await event.respond(f"❌ {e}", buttons=Button.inline("❌ لغو", b"cancel"))
+                    return
+
+                group = state['pishi_group']
+                target_msg_id = state['pishi_target_msg_id']
+                target_link = state['pishi_target_link']
+                total = len(selected)
+
+                del self.user_states[user_id]
+
+                progress_msg = await event.respond(
+                    f"⏳ **شروع انتقال موجودی...**\n\n"
+                    f"📢 گروه: `{group}`\n"
+                    f"👥 تعداد اکانت: {total}\n\n"
+                    f"لطفاً صبر کنید...",
+                    buttons=Button.inline("❌ لغو", b"cancel_scenario")
+                )
+
+                cancel_flag = {'cancelled': False}
+                self.running_operations[user_id] = cancel_flag
+
+                async def run_pishi_transfer():
+                    try:
+                        session_paths = [acc.session_path for acc in selected]
+
+                        async def update_progress(current, total, message):
+                            try:
+                                await progress_msg.edit(
+                                    f"⏳ **در حال انتقال...**\n\n"
+                                    f"📊 پیشرفت: {current}/{total}\n"
+                                    f"💬 {message}",
+                                    buttons=Button.inline("❌ لغو", b"cancel_scenario")
+                                )
+                            except Exception:
+                                pass
+
+                        results = await self.pishi_service.bulk_transfer(
+                            session_paths=session_paths,
+                            group_username=group,
+                            target_message_id=target_msg_id,
+                            progress_callback=update_progress,
+                            workers=1,
+                            cancel_flag=cancel_flag,
+                        )
+
+                        if cancel_flag.get('cancelled'):
+                            await progress_msg.edit(
+                                "❌ **انتقال لغو شد!**",
+                                buttons=Button.inline("🔙 منوی اصلی", b"back_to_menu")
+                            )
+                            return
+
+                        total_mio = results['total_transferred']
+
+                        result_text = (
+                            f"✅ **انتقال موجودی تکمیل شد!**\n\n"
+                            f"📢 گروه: `{group}`\n"
+                            f"💰 مجموع انتقال: {total_mio:,} میو پوینت\n"
+                            f"✅ موفق: {results['success']}\n"
+                            f"❌ ناموفق: {results['failed']}\n\n"
+                        )
+
+                        # نمایش جزئیات (۱۰ تا اول)
+                        for i, detail in enumerate(results['details'][:10], 1):
+                            acc = selected[i - 1]
+                            phone_short = (acc.phone or '')[-4:] or '****'
+                            r = detail['result']
+                            if r['success'] and r['balance'] > 0:
+                                result_text += f"✅ {phone_short}: {r['balance']:,} 🪙\n"
+                            elif r['success']:
+                                result_text += f"⬛ {phone_short}: موجودی صفر\n"
+                            else:
+                                result_text += f"❌ {phone_short}: {r['message'][:30]}\n"
+
+                        if len(results['details']) > 10:
+                            result_text += f"\n... و {len(results['details']) - 10} اکانت دیگر"
+
+                        await progress_msg.edit(
+                            result_text,
+                            buttons=[
+                                [Button.inline("💰 انتقال مجدد", b"pishi_transfer")],
+                                [Button.inline("🔙 پیشی", b"pishi_menu")]
+                            ]
+                        )
+
+                    except Exception as e:
+                        logger.exception(f"خطا در انتقال پیشی: {e}")
+                        await progress_msg.edit(
+                            f"❌ **خطا در انتقال:**\n\n{str(e)[:200]}",
+                            buttons=Button.inline("🔙 منوی اصلی", b"back_to_menu")
+                        )
+                    finally:
+                        if user_id in self.running_operations:
+                            del self.running_operations[user_id]
+
+                asyncio.create_task(run_pishi_transfer())
+
             # ─── Scheduled Scenario Steps ────────────────────────────────────
             elif step == 'sched_name':
                 name = event.message.text.strip()

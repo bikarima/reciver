@@ -8,5 +8,8 @@ from .backup_manager import BackupManager
 from .reaction_manager import ReactionManager
 from .block_manager import BlockManager
 from .note_manager import NoteManager
+from .pishi_service import PishiService
 
-__all__ = ['AccountReceiver', 'ChannelManager', 'ReferralManager', 'MessageSender', 'BotAutomation', 'BackupManager', 'ReactionManager', 'BlockManager', 'NoteManager']
+__all__ = ['AccountReceiver', 'ChannelManager', 'ReferralManager', 'MessageSender',
+           'BotAutomation', 'BackupManager', 'ReactionManager', 'BlockManager',
+           'NoteManager', 'PishiService']
