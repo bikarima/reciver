@@ -97,7 +97,13 @@ class PishiService:
             me = await client.get_me()
 
             # --- مرحله ۱: ارسال 'میوهام' ---
-            sent = await client.send_message(group, 'میوهام')
+            try:
+                sent = await client.send_message(group, 'میوهام')
+            except Exception as e:
+                err = str(e)
+                if 'banned' in err.lower() or 'UserBannedInChannel' in err:
+                    return {'success': False, 'balance': 0, 'message': 'اکانت در گروه ban شده است'}
+                raise
             sent_id = sent.id
             logger.info(f"[{session_path}] ارسال میوهام — msg_id={sent_id}")
 
