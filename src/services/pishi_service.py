@@ -33,16 +33,21 @@ def parse_mio_balance(text: str) -> Optional[int]:
     مثال متن: ─ 💰 میو پوینت ها : 8,806 🪙
     Returns: عدد موجودی یا None
     """
+    if not text:
+        return None
+
     patterns = [
-        r'میو پوینت ها?\s*:\s*([\d,]+)',
-        r'💰.*?:\s*([\d,]+)',
-        r'([\d,]+)\s*🪙',
+        r'میو پوینت\s*ها?\s*:\s*([\d,،]+)',   # میو پوینت ها : 8,806
+        r'💰[^\n]*:\s*([\d,،]+)',               # 💰 ... : 8806
+        r'([\d,،]+)\s*🪙',                      # 8,806 🪙
+        r'میو پوینت[^\d]*([\d,،]+)',            # میو پوینت ... 8806
     ]
     for pat in patterns:
-        m = re.search(pat, text)
+        m = re.search(pat, text, re.IGNORECASE)
         if m:
+            raw = m.group(1).replace(',', '').replace('،', '')
             try:
-                return int(m.group(1).replace(',', ''))
+                return int(raw)
             except ValueError:
                 continue
     return None
@@ -106,20 +111,35 @@ class PishiService:
                 elapsed += check_interval
 
                 # دریافت پیام‌های جدید بعد از پیام ما
-                msgs = await client.get_messages(group, limit=10, min_id=sent_id)
+                msgs = await client.get_messages(group, limit=15, min_id=sent_id - 1)
+
+                logger.info(f"[{session_path}] چک پیام‌ها (elapsed={elapsed}s): {len(msgs)} پیام دریافت شد")
 
                 for msg in msgs:
+                    if msg.id <= sent_id:
+                        continue  # پیام خودمونه یا قدیمی‌تر
+
+                    reply_to_id = None
+                    if msg.reply_to:
+                        reply_to_id = getattr(msg.reply_to, 'reply_to_msg_id', None)
+
+                    logger.info(
+                        f"[{session_path}] پیام id={msg.id} "
+                        f"from={getattr(msg.sender_id, '__str__', lambda: msg.sender_id)()} "
+                        f"reply_to={reply_to_id} "
+                        f"text={repr((msg.text or '')[:80])}"
+                    )
+
                     if not msg.text:
                         continue
-                    # باید reply به پیام ما باشه
-                    is_reply_to_us = (
-                        msg.reply_to and
-                        msg.reply_to.reply_to_msg_id == sent_id
-                    )
+
+                    # reply به پیام ما باشه
+                    is_reply_to_us = reply_to_id == sent_id
                     if not is_reply_to_us:
                         continue
 
                     parsed = parse_mio_balance(msg.text)
+                    logger.info(f"[{session_path}] parse نتیجه: {parsed} از متن: {repr(msg.text[:100])}")
                     if parsed is not None:
                         balance = parsed
                         logger.info(f"[{session_path}] موجودی دریافت شد: {balance}")
@@ -143,18 +163,86 @@ class PishiService:
                 }
 
             # --- مرحله ۳: reply به پیام target ---
-            transfer_text = f'انتقال موجودی میویی {balance}'
-            await client.send_message(
+            transfer_text = f'انتقال میویی {balance}'
+            transfer_sent = await client.send_message(
                 group,
                 transfer_text,
                 reply_to=target_message_id
             )
-            logger.info(f"[{session_path}] انتقال {balance} — reply به msg {target_message_id}")
+            transfer_sent_id = transfer_sent.id
+            logger.info(f"[{session_path}] ارسال دستور انتقال {balance} — msg_id={transfer_sent_id}")
+
+            # --- مرحله ۴: منتظر reply ربات به پیام انتقال و کلیک دکمه #0 ---
+            confirm_elapsed = 0
+            confirm_timeout = 20
+            confirmed = False
+
+            while confirm_elapsed < confirm_timeout:
+                await asyncio.sleep(2)
+                confirm_elapsed += 2
+
+                new_msgs = await client.get_messages(group, limit=10, min_id=transfer_sent_id)
+                for msg in new_msgs:
+                    if msg.id <= transfer_sent_id:
+                        continue
+                    if not msg.buttons:
+                        continue
+
+                    # reply به پیام انتقال ما باشه
+                    reply_to_id = getattr(getattr(msg, 'reply_to', None), 'reply_to_msg_id', None)
+                    if reply_to_id != transfer_sent_id:
+                        continue
+
+                    logger.info(f"[{session_path}] پیام تایید پیدا شد id={msg.id}, کلیک دکمه #0")
+                    try:
+                        all_buttons = []
+                        for row in msg.buttons:
+                            for btn in row:
+                                all_buttons.append(btn)
+                        if all_buttons:
+                            await all_buttons[0].click()
+                            confirmed = True
+                            logger.info(f"[{session_path}] دکمه تایید کلیک شد ✅")
+                    except Exception as e:
+                        logger.warning(f"[{session_path}] خطا در کلیک دکمه تایید: {e}")
+                    break
+
+                if confirmed:
+                    break
+
+            if not confirmed:
+                logger.warning(f"[{session_path}] پیام تایید در {confirm_timeout}s پیدا نشد")
+
+            # --- مرحله ۵: منتظر تایید نهایی (edit پیام ربات) ---
+            final_success = False
+            if confirmed:
+                await asyncio.sleep(3)
+                # پیام ربات edit میشه — دوباره می‌خونیم
+                try:
+                    check_msgs = await client.get_messages(group, limit=10, min_id=transfer_sent_id)
+                    for msg in check_msgs:
+                        reply_to_id = getattr(getattr(msg, 'reply_to', None), 'reply_to_msg_id', None)
+                        if reply_to_id != transfer_sent_id:
+                            continue
+                        msg_text = msg.text or ''
+                        if 'با موفقیت انتقال یافت' in msg_text or '✅' in msg_text:
+                            final_success = True
+                            logger.info(f"[{session_path}] انتقال با موفقیت تایید شد ✅")
+                            break
+                except Exception as e:
+                    logger.warning(f"[{session_path}] خطا در چک تایید نهایی: {e}")
 
             return {
                 'success': True,
                 'balance': balance,
-                'message': f'انتقال {balance:,} میو پوینت انجام شد'
+                'confirmed': confirmed,
+                'final_success': final_success,
+                'message': (
+                    f'انتقال {balance:,} میو پوینت با موفقیت تایید شد ✅'
+                    if final_success else
+                    f'انتقال {balance:,} میو پوینت ارسال شد'
+                    + (' — دکمه تایید کلیک شد' if confirmed else ' — دکمه تایید پیدا نشد')
+                )
             }
 
         except Exception as e:

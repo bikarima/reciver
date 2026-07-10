@@ -4170,8 +4170,10 @@ class BotHandler:
                             acc = selected[i - 1]
                             phone_short = (acc.phone or '')[-4:] or '****'
                             r = detail['result']
-                            if r['success'] and r['balance'] > 0:
-                                result_text += f"✅ {phone_short}: {r['balance']:,} 🪙\n"
+                            if r.get('final_success'):
+                                result_text += f"✅ {phone_short}: {r['balance']:,} 🪙 تایید شد\n"
+                            elif r['success'] and r['balance'] > 0:
+                                result_text += f"⚠️ {phone_short}: {r['balance']:,} 🪙 (تایید نشد)\n"
                             elif r['success']:
                                 result_text += f"⬛ {phone_short}: موجودی صفر\n"
                             else:
