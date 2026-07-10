@@ -1720,7 +1720,8 @@ class BotHandler:
                 "از این بخش می‌توانید عملیات مربوط به ربات پیشی را مدیریت کنید.",
                 buttons=[
                     [Button.inline("⏰ سناریو زمانبندی", b"scheduled_scenario")],
-                    [Button.inline("🐟 ماهی انتقال موجودی", b"pishi_transfer")],
+                    [Button.inline("🐟 ماهی", b"pishi_fish")],
+                    [Button.inline("💰 انتقال موجودی", b"pishi_transfer")],
                     [Button.inline("🗑 خالی کردن پیشی", b"pishi_empty")],
                     [Button.inline("⬆️ ارتقا دادن پیشی", b"pishi_upgrade")],
                     [Button.inline("🔙 منوی اصلی", b"back_to_menu")]
@@ -1729,14 +1730,25 @@ class BotHandler:
 
         @self.bot.on(events.CallbackQuery(pattern=b"pishi_transfer"))
         async def pishi_transfer_callback(event):
-            """ماهی انتقال موجودی"""
+            """انتقال موجودی"""
             if not await self._check_admin_access(event):
                 return
             await event.answer()
             await event.edit(
-                "🐟 **ماهی انتقال موجودی**\n\n"
-                "🚧 این قابلیت به زودی اضافه می‌شود.\n\n"
-                "برای تعریف این قابلیت با سازنده صحبت کنید.",
+                "💰 **انتقال موجودی**\n\n"
+                "🚧 این قابلیت به زودی اضافه می‌شود.",
+                buttons=Button.inline("🔙 برگشت", b"pishi_menu")
+            )
+
+        @self.bot.on(events.CallbackQuery(pattern=b"pishi_fish"))
+        async def pishi_fish_callback(event):
+            """ماهی"""
+            if not await self._check_admin_access(event):
+                return
+            await event.answer()
+            await event.edit(
+                "🐟 **ماهی**\n\n"
+                "🚧 این قابلیت به زودی اضافه می‌شود.",
                 buttons=Button.inline("🔙 برگشت", b"pishi_menu")
             )
 
