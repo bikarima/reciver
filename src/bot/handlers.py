@@ -972,29 +972,29 @@ class BotHandler:
             logger.error(f"خطا در بازیابی سناریوهای زمانبندی: {e}")
 
         # بازیابی اتوماسیون‌های پیشی فعال بعد از restart
-        try:
-            running_pishi = await self.db.get_all_running_pishi()
-            for cfg in running_pishi:
-                aid = cfg['account_id']
-                uid = cfg['user_id']
-                task = asyncio.create_task(self._run_pishi_automation(aid, uid))
-                self.pishi_automation_tasks[aid] = task
-                logger.info(f"[pishi_auto] اتوماسیون account_id={aid} بازیابی شد")
-        except Exception as e:
-            logger.error(f"خطا در بازیابی اتوماسیون پیشی: {e}")
+        # DISABLED - پیشی اتوماسیون موقتاً غیرفعال است
+        # try:
+        #     running_pishi = await self.db.get_all_running_pishi()
+        #     for cfg in running_pishi:
+        #         aid = cfg['account_id']
+        #         uid = cfg['user_id']
+        #         task = asyncio.create_task(self._run_pishi_automation(aid, uid))
+        #         self.pishi_automation_tasks[aid] = task
+        # except Exception as e:
+        #     logger.error(f"خطا در بازیابی اتوماسیون پیشی: {e}")
 
         # بازیابی پنل‌های پیشی فعال بعد از restart
-        try:
-            running_panels = await self.db.get_all_running_pishi_panels()
-            for panel in running_panels:
-                uid = panel['user_id']
-                if uid not in self.pishi_automation_tasks or \
-                   self.pishi_automation_tasks[uid].done():
-                    task = asyncio.create_task(self._run_pishi_panel(uid))
-                    self.pishi_automation_tasks[uid] = task
-                    logger.info(f"[pishi_panel] پنل user={uid} بازیابی شد")
-        except Exception as e:
-            logger.error(f"خطا در بازیابی پنل پیشی: {e}")
+        # DISABLED - پیشی پنل موقتاً غیرفعال است
+        # try:
+        #     running_panels = await self.db.get_all_running_pishi_panels()
+        #     for panel in running_panels:
+        #         uid = panel['user_id']
+        #         if uid not in self.pishi_automation_tasks or \
+        #            self.pishi_automation_tasks[uid].done():
+        #             task = asyncio.create_task(self._run_pishi_panel(uid))
+        #             self.pishi_automation_tasks[uid] = task
+        # except Exception as e:
+        #     logger.error(f"خطا در بازیابی پنل پیشی: {e}")
         
         # ثبت هندلرها
         self._register_handlers()
@@ -1094,7 +1094,6 @@ class BotHandler:
                     [Button.inline("🎯 سناریو پیشرفته", b"advanced_scenario"),
                      Button.inline("👥 لیچر", b"leecher")],
                     [Button.inline("🎨 اعمال پروفایل", b"apply_profiles")],
-                    [Button.inline("🐱 پیشی", b"pishi_menu")],
                     [Button.inline("📝 یادداشت‌های من", b"my_notes")],
                     [Button.inline("⚙️ مدیریت ربات", b"bot_management")],
                     [Button.inline("👑 پنل ادمین", b"admin_panel")]
@@ -1130,7 +1129,6 @@ class BotHandler:
                     [Button.inline("🎯 سناریو پیشرفته", b"advanced_scenario"),
                      Button.inline("👥 لیچر", b"leecher")],
                     [Button.inline("🎨 اعمال پروفایل", b"apply_profiles")],
-                    [Button.inline("🐱 پیشی", b"pishi_menu")],
                     [Button.inline("📝 یادداشت‌های من", b"my_notes")],
                     [Button.inline("⚙️ مدیریت ربات", b"bot_management")],
                     [Button.inline("👑 پنل ادمین", b"admin_panel")]
@@ -1940,6 +1938,16 @@ class BotHandler:
                 return
             await event.answer()
             user_id = event.sender_id
+
+            # ── موقتاً غیرفعال ──────────────────────────────────────
+            if user_id not in Config.ADMIN_IDS:
+                await event.edit(
+                    "🐱 **پنل پیشی**\n\n"
+                    "🚧 این بخش در حال توسعه است و به زودی فعال می‌شود.",
+                    buttons=Button.inline("🔙 منوی اصلی", b"back_to_menu")
+                )
+                return
+            # ────────────────────────────────────────────────────────
             cfg = await self.db.get_pishi_panel(user_id)
             if not cfg:
                 await self.db.init_pishi_panel(user_id)
@@ -2561,7 +2569,6 @@ class BotHandler:
                     [Button.inline("🎯 سناریو پیشرفته", b"advanced_scenario"),
                      Button.inline("👥 لیچر", b"leecher")],
                     [Button.inline("🎨 اعمال پروفایل", b"apply_profiles")],
-                    [Button.inline("🐱 پیشی", b"pishi_menu")],
                     [Button.inline("📝 یادداشت‌های من", b"my_notes")],
                     [Button.inline("⚙️ مدیریت ربات", b"bot_management")],
                     [Button.inline("👑 پنل ادمین", b"admin_panel")]
@@ -2581,7 +2588,6 @@ class BotHandler:
                     [Button.inline("🎯 سناریو پیشرفته", b"advanced_scenario"),
                      Button.inline("👥 لیچر", b"leecher")],
                     [Button.inline("🎨 اعمال پروفایل", b"apply_profiles")],
-                    [Button.inline("🐱 پیشی", b"pishi_menu")],
                     [Button.inline("📝 یادداشت‌های من", b"my_notes")],
                     [Button.inline("⚙️ مدیریت ربات", b"bot_management")],
                     [Button.inline("👑 پنل ادمین", b"admin_panel")]
