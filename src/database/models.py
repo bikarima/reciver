@@ -192,6 +192,26 @@ class Database:
                 )
             """)
 
+            # جدول پنل اتوماسیون پیشی (per user - تنظیمات کلی)
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS pishi_panel (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL UNIQUE,
+                    group_username TEXT NOT NULL DEFAULT '@meavmeacv',
+                    account_count INTEGER DEFAULT NULL,
+                    mio_enabled INTEGER DEFAULT 1,
+                    mio_interval_minutes INTEGER DEFAULT 5,
+                    fish_enabled INTEGER DEFAULT 1,
+                    fish_interval_minutes INTEGER DEFAULT 60,
+                    transfer_enabled INTEGER DEFAULT 0,
+                    transfer_hour INTEGER DEFAULT 0,
+                    transfer_target_msg_id INTEGER DEFAULT NULL,
+                    is_running INTEGER DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES users (user_id)
+                )
+            """)
+
             # جدول تنظیمات اتوماسیون پیشی (per account per user)
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS pishi_automation (
@@ -683,7 +703,72 @@ class Database:
             print(f"خطا در حذف سناریو: {e}")
             return False
 
-    # ─── Pishi Automation ───────────────────────────────────────────────────
+    # ─── Pishi Panel (per-user settings) ───────────────────────────────────
+
+    async def init_pishi_panel(self, user_id: int) -> bool:
+        """ایجاد تنظیمات پیش‌فرض پنل پیشی برای کاربر"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute("""
+                    INSERT OR IGNORE INTO pishi_panel
+                    (user_id, group_username, mio_enabled, mio_interval_minutes,
+                     fish_enabled, fish_interval_minutes, transfer_enabled,
+                     transfer_hour, is_running)
+                    VALUES (?, '@meavmeacv', 1, 5, 1, 60, 0, 0, 0)
+                """, (user_id,))
+                await db.commit()
+                return True
+        except Exception as e:
+            print(f"خطا در init_pishi_panel: {e}")
+            return False
+
+    async def get_pishi_panel(self, user_id: int) -> Optional[Dict[str, Any]]:
+        """دریافت تنظیمات پنل پیشی کاربر"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM pishi_panel WHERE user_id=?", (user_id,)
+            ) as cur:
+                row = await cur.fetchone()
+                return dict(row) if row else None
+
+    async def upsert_pishi_panel(self, user_id: int, **kwargs) -> bool:
+        """بروزرسانی تنظیمات پنل پیشی"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute(
+                    "SELECT id FROM pishi_panel WHERE user_id=?", (user_id,)
+                ) as cur:
+                    row = await cur.fetchone()
+                if row:
+                    if kwargs:
+                        sets = ', '.join(f"{k}=?" for k in kwargs)
+                        vals = list(kwargs.values()) + [user_id]
+                        await db.execute(
+                            f"UPDATE pishi_panel SET {sets} WHERE user_id=?", vals
+                        )
+                else:
+                    fields = ['user_id'] + list(kwargs.keys())
+                    ph = ','.join('?' for _ in fields)
+                    vals = [user_id] + list(kwargs.values())
+                    await db.execute(
+                        f"INSERT INTO pishi_panel ({','.join(fields)}) VALUES ({ph})", vals
+                    )
+                await db.commit()
+                return True
+        except Exception as e:
+            print(f"خطا در upsert_pishi_panel: {e}")
+            return False
+
+    async def get_all_running_pishi_panels(self) -> List[Dict[str, Any]]:
+        """دریافت همه پنل‌های فعال برای restore بعد از restart"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM pishi_panel WHERE is_running=1"
+            ) as cur:
+                rows = await cur.fetchall()
+                return [dict(r) for r in rows]
 
     async def upsert_pishi_automation(self, user_id: int, account_id: int, **kwargs) -> bool:
         """ایجاد یا بروزرسانی تنظیمات اتوماسیون پیشی برای یک اکانت"""

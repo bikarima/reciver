@@ -640,6 +640,114 @@ class BotHandler:
             if user_id in self.running_operations:
                 del self.running_operations[user_id]
     
+    async def _run_pishi_panel(self, user_id: int):
+        """
+        Loop اتوماسیون پیشی per-user:
+        تنظیمات کلی رو می‌خونه و برای N اکانت انتخاب شده:
+        - هر mio_interval_minutes: میو
+        - هر fish_interval_minutes: ماهی
+        - ساعت transfer_hour: انتقال موجودی
+        اکانت‌ها با تاخیر پخش شده در بازه هر تسک اجرا میشن
+        """
+        import time
+        from datetime import datetime
+
+        logger.info(f"[pishi_panel] شروع اتوماسیون user={user_id}")
+
+        # timer آخرین اجرا برای هر اکانت
+        last_mio:   dict = {}   # session_path → float
+        last_fish:  dict = {}
+        last_transfer_date: dict = {}   # session_path → date
+
+        while True:
+            try:
+                cfg = await self.db.get_pishi_panel(user_id)
+                if not cfg or not cfg['is_running']:
+                    logger.info(f"[pishi_panel] user={user_id} متوقف شد")
+                    break
+
+                accounts_all = await self.db.get_accounts(user_id)
+                active = [a for a in accounts_all if a.status == 'active' and a.session_path]
+                count = cfg.get('account_count') or len(active)
+                try:
+                    count = int(count)
+                except (TypeError, ValueError):
+                    count = len(active)
+                selected = active[:min(count, len(active))]
+
+                if not selected:
+                    await asyncio.sleep(60)
+                    continue
+
+                group = cfg['group_username']
+                now = time.time()
+                today = datetime.now().date()
+                current_hour = datetime.now().hour
+
+                # پخش تسک‌ها در بازه زمانی — تاخیر بین هر اکانت
+                mio_interval_sec  = cfg['mio_interval_minutes'] * 60
+                fish_interval_sec = cfg['fish_interval_minutes'] * 60
+                # تاخیر بین اکانت‌ها = بازه / تعداد اکانت (حداقل ۱۰ ثانیه)
+                acc_delay = max(10, mio_interval_sec // max(len(selected), 1))
+
+                for acc in selected:
+                    sp = acc.session_path
+
+                    # ─── میو ──────────────────────────────────────────
+                    if cfg['mio_enabled']:
+                        t_last = last_mio.get(sp, 0)
+                        if now - t_last >= mio_interval_sec:
+                            try:
+                                r = await self.pishi_service.send_mio(sp, group)
+                                status = '✅' if r['success'] else f"❌ {r['message'][:30]}"
+                                logger.info(f"[pishi/mio] {acc.phone} {status}")
+                                last_mio[sp] = time.time()
+                            except Exception as e:
+                                logger.error(f"[pishi/mio] {acc.phone}: {e}")
+                                last_mio[sp] = time.time()
+                            await asyncio.sleep(acc_delay)
+
+                    # ─── ماهی ─────────────────────────────────────────
+                    if cfg['fish_enabled']:
+                        t_last = last_fish.get(sp, 0)
+                        if now - t_last >= fish_interval_sec:
+                            try:
+                                r = await self.pishi_service.send_fish_and_click(sp, group, button_index=1)
+                                status = '✅' if r['success'] else f"❌ {r['message'][:30]}"
+                                logger.info(f"[pishi/fish] {acc.phone} {status}")
+                                last_fish[sp] = time.time()
+                            except Exception as e:
+                                logger.error(f"[pishi/fish] {acc.phone}: {e}")
+                                last_fish[sp] = time.time()
+                            await asyncio.sleep(acc_delay)
+
+                    # ─── انتقال موجودی ────────────────────────────────
+                    if cfg['transfer_enabled'] and cfg.get('transfer_target_msg_id'):
+                        transfer_hour = cfg.get('transfer_hour', 0)
+                        last_td = last_transfer_date.get(sp)
+                        if last_td != today and current_hour == transfer_hour:
+                            try:
+                                r = await self.pishi_service.transfer_balance(
+                                    sp, group, cfg['transfer_target_msg_id']
+                                )
+                                status = '✅' if r.get('final_success') else f"⚠️ {r['message'][:30]}"
+                                logger.info(f"[pishi/transfer] {acc.phone} {status}")
+                                last_transfer_date[sp] = today
+                            except Exception as e:
+                                logger.error(f"[pishi/transfer] {acc.phone}: {e}")
+                                last_transfer_date[sp] = today
+                            await asyncio.sleep(acc_delay)
+
+                # صبر ۳۰ ثانیه قبل از چک بعدی
+                await asyncio.sleep(30)
+
+            except asyncio.CancelledError:
+                logger.info(f"[pishi_panel] user={user_id} لغو شد")
+                break
+            except Exception as e:
+                logger.error(f"[pishi_panel] user={user_id} خطا: {e}")
+                await asyncio.sleep(60)
+
     async def _run_pishi_automation(self, account_id: int, user_id: int):
         """
         Loop اتوماسیون پیشی برای یک اکانت:
@@ -876,6 +984,19 @@ class BotHandler:
                 logger.info(f"[pishi_auto] اتوماسیون account_id={aid} بازیابی شد")
         except Exception as e:
             logger.error(f"خطا در بازیابی اتوماسیون پیشی: {e}")
+
+        # بازیابی پنل‌های پیشی فعال بعد از restart
+        try:
+            running_panels = await self.db.get_all_running_pishi_panels()
+            for panel in running_panels:
+                uid = panel['user_id']
+                if uid not in self.pishi_automation_tasks or \
+                   self.pishi_automation_tasks[uid].done():
+                    task = asyncio.create_task(self._run_pishi_panel(uid))
+                    self.pishi_automation_tasks[uid] = task
+                    logger.info(f"[pishi_panel] پنل user={uid} بازیابی شد")
+        except Exception as e:
+            logger.error(f"خطا در بازیابی پنل پیشی: {e}")
         
         # ثبت هندلرها
         self._register_handlers()
@@ -1816,314 +1937,168 @@ class BotHandler:
 
         @self.bot.on(events.CallbackQuery(pattern=b"pishi_menu"))
         async def pishi_menu_callback(event):
-            """منوی پیشی"""
-            if not await self._check_admin_access(event):
-                return
-            await event.answer()
-
-            await event.edit(
-                "🐱 **پیشی**\n\n"
-                "از این بخش می‌توانید عملیات مربوط به ربات پیشی را مدیریت کنید.",
-                buttons=[
-                    [Button.inline("🤖 اتوماسیون پیشی", b"pishi_automation")],
-                    [Button.inline("⏰ سناریو زمانبندی", b"scheduled_scenario")],
-                    [Button.inline("💰 انتقال موجودی (دستی)", b"pishi_transfer")],
-                    [Button.inline("🗑 خالی کردن پیشی", b"pishi_empty")],
-                    [Button.inline("⬆️ ارتقا دادن پیشی", b"pishi_upgrade")],
-                    [Button.inline("🔙 منوی اصلی", b"back_to_menu")]
-                ]
-            )
-
-        @self.bot.on(events.CallbackQuery(pattern=b"pishi_automation"))
-        async def pishi_automation_callback(event):
             """پنل اتوماسیون پیشی"""
             if not await self._check_admin_access(event):
                 return
             await event.answer()
             user_id = event.sender_id
+            cfg = await self.db.get_pishi_panel(user_id)
+            if not cfg:
+                await self.db.init_pishi_panel(user_id)
+                cfg = await self.db.get_pishi_panel(user_id)
 
             accounts = await self.db.get_accounts(user_id)
             active_accounts = [a for a in accounts if a.status == 'active' and a.session_path]
+            total_acc = len(active_accounts)
+            acc_count = cfg.get('account_count') or total_acc
+            if acc_count == 'all' or acc_count == total_acc:
+                acc_count_text = f"همه ({total_acc})"
+            else:
+                acc_count_text = f"{acc_count} از {total_acc}"
 
-            if not active_accounts:
-                await event.edit(
-                    "❌ اکانت فعالی ندارید.",
-                    buttons=Button.inline("🔙 برگشت", b"pishi_menu")
-                )
-                return
-
-            cfgs = await self.db.get_user_pishi_automations(user_id)
-            cfg_map = {c['account_id']: c for c in cfgs}
-
-            running = sum(1 for c in cfgs if c['is_running'])
-
-            text = "🤖 **اتوماسیون پیشی**\n\n"
-            text += f"📊 اکانت‌های فعال: {len(active_accounts)}\n"
-            text += f"▶️ در حال اجرا: {running}\n\n"
-            text += "برای تنظیم هر اکانت روی آن کلیک کنید:\n"
-
-            buttons = []
-            for acc in active_accounts[:15]:
-                cfg = cfg_map.get(acc.id)
-                is_run = cfg and cfg['is_running']
-                icon = "▶️" if is_run else "⏹"
-                phone_short = (acc.phone or '')[-7:] if acc.phone else '?'
-                uname = f"@{acc.telegram_username}" if acc.telegram_username else phone_short
-                buttons.append([
-                    Button.inline(
-                        f"{icon} {uname}",
-                        f"pishi_acc_{acc.id}".encode()
-                    )
-                ])
-
-            buttons.append([
-                Button.inline("▶️ شروع همه", b"pishi_start_all"),
-                Button.inline("⏹ توقف همه", b"pishi_stop_all")
-            ])
-            buttons.append([Button.inline("⚙️ تنظیمات گروه", b"pishi_global_settings")])
-            buttons.append([Button.inline("🔙 برگشت", b"pishi_menu")])
-
-            await event.edit(text, buttons=buttons)
-
-        @self.bot.on(events.CallbackQuery(pattern=rb"pishi_acc_(\d+)"))
-        async def pishi_acc_callback(event):
-            """تنظیمات یک اکانت پیشی"""
-            if not await self._check_admin_access(event):
-                return
-            await event.answer()
-            user_id = event.sender_id
-            account_id = int(event.pattern_match.group(1))
-
-            accounts = await self.db.get_accounts(user_id)
-            acc = next((a for a in accounts if a.id == account_id), None)
-            if not acc:
-                await event.answer("اکانت پیدا نشد", alert=True)
-                return
-
-            cfg = await self.db.get_pishi_automation(user_id, account_id)
-            if not cfg:
-                # ایجاد رکورد پیش‌فرض
-                await self.db.upsert_pishi_automation(user_id, account_id,
-                    group_username='@meavmeacv')
-                cfg = await self.db.get_pishi_automation(user_id, account_id)
-
-            phone_short = (acc.phone or '')[-7:]
-            uname = f"@{acc.telegram_username}" if acc.telegram_username else phone_short
-            is_run = cfg['is_running']
-            run_icon = "▶️ در حال اجرا" if is_run else "⏹ متوقف"
-
-            mio_icon = "✅" if cfg['mio_enabled'] else "❌"
-            fish_icon = "✅" if cfg['fish_enabled'] else "❌"
-            transfer_icon = "✅" if cfg['transfer_enabled'] else "❌"
-
-            target_text = f"msg #{cfg['transfer_target_msg_id']}" if cfg.get('transfer_target_msg_id') else "تنظیم نشده"
+            is_run = user_id in self.pishi_automation_tasks and \
+                     not self.pishi_automation_tasks[user_id].done()
+            run_icon = "🟢 روشن" if is_run else "🔴 خاموش"
+            mio_icon   = "✅" if cfg['mio_enabled']      else "❌"
+            fish_icon  = "✅" if cfg['fish_enabled']     else "❌"
+            trans_icon = "✅" if cfg['transfer_enabled'] else "❌"
+            target_text = f"msg #{cfg['transfer_target_msg_id']}" \
+                          if cfg.get('transfer_target_msg_id') else "تنظیم نشده"
 
             text = (
-                f"⚙️ **تنظیمات پیشی — {uname}**\n\n"
+                f"🐱 **پنل اتوماسیون پیشی**\n\n"
                 f"وضعیت: {run_icon}\n"
-                f"📢 گروه: `{cfg['group_username']}`\n\n"
+                f"📢 گروه: `{cfg['group_username']}`\n"
+                f"👥 اکانت: {acc_count_text}\n\n"
                 f"{mio_icon} **میو** — هر {cfg['mio_interval_minutes']} دقیقه\n"
                 f"{fish_icon} **ماهی** — هر {cfg['fish_interval_minutes']} دقیقه\n"
-                f"{transfer_icon} **انتقال** — ساعت {cfg.get('transfer_hour', 0):02d}:00\n"
-                f"  🎯 target: {target_text}\n"
+                f"{trans_icon} **انتقال اتومات** — ساعت {cfg.get('transfer_hour',0):02d}:00\n"
+                f"   🎯 target: {target_text}\n"
             )
-
-            aid_b = str(account_id).encode()
-            run_btn = Button.inline("⏹ توقف", f"pishi_stop_{account_id}".encode()) if is_run else \
-                      Button.inline("▶️ شروع", f"pishi_start_{account_id}".encode())
-
+            run_btn = Button.inline("⏹ خاموش کردن", b"pishi_stop_panel") if is_run else \
+                      Button.inline("▶️ روشن کردن", b"pishi_start_panel")
             buttons = [
                 [run_btn],
-                [Button.inline(f"{mio_icon} میو ON/OFF", f"pishi_toggle_mio_{account_id}".encode()),
-                 Button.inline(f"⏱ {cfg['mio_interval_minutes']}دق", f"pishi_set_mio_interval_{account_id}".encode())],
-                [Button.inline(f"{fish_icon} ماهی ON/OFF", f"pishi_toggle_fish_{account_id}".encode()),
-                 Button.inline(f"⏱ {cfg['fish_interval_minutes']}دق", f"pishi_set_fish_interval_{account_id}".encode())],
-                [Button.inline(f"{transfer_icon} انتقال ON/OFF", f"pishi_toggle_transfer_{account_id}".encode()),
-                 Button.inline(f"🕐 ساعت {cfg.get('transfer_hour',0):02d}", f"pishi_set_transfer_hour_{account_id}".encode())],
-                [Button.inline("🎯 تنظیم target انتقال", f"pishi_set_target_{account_id}".encode())],
-                [Button.inline("🔙 برگشت", b"pishi_automation")]
+                [Button.inline(f"{mio_icon} میو", b"pishi_toggle_mio_p"),
+                 Button.inline("⏱ زمان میو", b"pishi_set_mio_p")],
+                [Button.inline(f"{fish_icon} ماهی", b"pishi_toggle_fish_p"),
+                 Button.inline("⏱ زمان ماهی", b"pishi_set_fish_p")],
+                [Button.inline(f"{trans_icon} انتقال اتومات", b"pishi_toggle_trans_p"),
+                 Button.inline("⚙️ تنظیمات انتقال", b"pishi_set_trans_p")],
+                [Button.inline("👥 تعداد اکانت", b"pishi_set_count_p")],
+                [Button.inline("🔙 منوی اصلی", b"back_to_menu")]
             ]
             await event.edit(text, buttons=buttons)
 
-        @self.bot.on(events.CallbackQuery(pattern=rb"pishi_start_(\d+)"))
-        async def pishi_start_account(event):
+        @self.bot.on(events.CallbackQuery(pattern=b"pishi_automation"))
+        async def pishi_automation_redirect(event):
+            """redirect به پنل اصلی"""
+            if not await self._check_admin_access(event): return
+            await event.answer()
+            await pishi_menu_callback(event)
+
+        @self.bot.on(events.CallbackQuery(pattern=b"pishi_start_panel"))
+        async def pishi_start_panel(event):
             if not await self._check_admin_access(event): return
             await event.answer()
             user_id = event.sender_id
-            account_id = int(event.pattern_match.group(1))
+            await self.db.upsert_pishi_panel(user_id, is_running=1)
+            if user_id not in self.pishi_automation_tasks or \
+               self.pishi_automation_tasks[user_id].done():
+                task = asyncio.create_task(self._run_pishi_panel(user_id))
+                self.pishi_automation_tasks[user_id] = task
+            await pishi_menu_callback(event)
 
-            await self.db.upsert_pishi_automation(user_id, account_id, is_running=1)
-
-            if account_id not in self.pishi_automation_tasks or \
-               self.pishi_automation_tasks[account_id].done():
-                task = asyncio.create_task(self._run_pishi_automation(account_id, user_id))
-                self.pishi_automation_tasks[account_id] = task
-
-            await event.answer("▶️ شروع شد!", alert=False)
-            # بازگشت به صفحه اکانت
-            fake = type('obj', (object,), {
-                'answer': event.answer,
-                'edit': event.edit,
-                'sender_id': user_id,
-                'pattern_match': event.pattern_match
-            })()
-            await pishi_acc_callback(event)
-
-        @self.bot.on(events.CallbackQuery(pattern=rb"pishi_stop_(\d+)"))
-        async def pishi_stop_account(event):
+        @self.bot.on(events.CallbackQuery(pattern=b"pishi_stop_panel"))
+        async def pishi_stop_panel(event):
             if not await self._check_admin_access(event): return
             await event.answer()
             user_id = event.sender_id
-            account_id = int(event.pattern_match.group(1))
+            await self.db.upsert_pishi_panel(user_id, is_running=0)
+            task = self.pishi_automation_tasks.pop(user_id, None)
+            if task: task.cancel()
+            await pishi_menu_callback(event)
 
-            await self.db.upsert_pishi_automation(user_id, account_id, is_running=0)
-            task = self.pishi_automation_tasks.pop(account_id, None)
-            if task:
-                task.cancel()
+        @self.bot.on(events.CallbackQuery(pattern=b"pishi_toggle_mio_p"))
+        async def pishi_toggle_mio_p(event):
+            if not await self._check_admin_access(event): return
+            await event.answer()
+            cfg = await self.db.get_pishi_panel(event.sender_id)
+            await self.db.upsert_pishi_panel(event.sender_id, mio_enabled=0 if cfg['mio_enabled'] else 1)
+            await pishi_menu_callback(event)
 
-            await event.answer("⏹ متوقف شد!", alert=False)
-            await pishi_acc_callback(event)
+        @self.bot.on(events.CallbackQuery(pattern=b"pishi_toggle_fish_p"))
+        async def pishi_toggle_fish_p(event):
+            if not await self._check_admin_access(event): return
+            await event.answer()
+            cfg = await self.db.get_pishi_panel(event.sender_id)
+            await self.db.upsert_pishi_panel(event.sender_id, fish_enabled=0 if cfg['fish_enabled'] else 1)
+            await pishi_menu_callback(event)
 
-        @self.bot.on(events.CallbackQuery(pattern=rb"pishi_toggle_mio_(\d+)"))
-        async def pishi_toggle_mio(event):
+        @self.bot.on(events.CallbackQuery(pattern=b"pishi_toggle_trans_p"))
+        async def pishi_toggle_trans_p(event):
             if not await self._check_admin_access(event): return
             await event.answer()
             user_id = event.sender_id
-            account_id = int(event.pattern_match.group(1))
-            cfg = await self.db.get_pishi_automation(user_id, account_id)
-            new_val = 0 if (cfg and cfg['mio_enabled']) else 1
-            await self.db.upsert_pishi_automation(user_id, account_id, mio_enabled=new_val)
-            await pishi_acc_callback(event)
-
-        @self.bot.on(events.CallbackQuery(pattern=rb"pishi_toggle_fish_(\d+)"))
-        async def pishi_toggle_fish(event):
-            if not await self._check_admin_access(event): return
-            await event.answer()
-            user_id = event.sender_id
-            account_id = int(event.pattern_match.group(1))
-            cfg = await self.db.get_pishi_automation(user_id, account_id)
-            new_val = 0 if (cfg and cfg['fish_enabled']) else 1
-            await self.db.upsert_pishi_automation(user_id, account_id, fish_enabled=new_val)
-            await pishi_acc_callback(event)
-
-        @self.bot.on(events.CallbackQuery(pattern=rb"pishi_toggle_transfer_(\d+)"))
-        async def pishi_toggle_transfer(event):
-            if not await self._check_admin_access(event): return
-            await event.answer()
-            user_id = event.sender_id
-            account_id = int(event.pattern_match.group(1))
-            cfg = await self.db.get_pishi_automation(user_id, account_id)
-            if cfg and cfg['transfer_enabled'] and not cfg.get('transfer_target_msg_id'):
-                await event.answer("❌ ابتدا target انتقال را تنظیم کنید!", alert=True)
+            cfg = await self.db.get_pishi_panel(user_id)
+            if not cfg['transfer_enabled'] and not cfg.get('transfer_target_msg_id'):
+                await event.answer("❌ ابتدا تنظیمات انتقال را کامل کنید!", alert=True)
                 return
-            new_val = 0 if (cfg and cfg['transfer_enabled']) else 1
-            await self.db.upsert_pishi_automation(user_id, account_id, transfer_enabled=new_val)
-            await pishi_acc_callback(event)
+            await self.db.upsert_pishi_panel(user_id, transfer_enabled=0 if cfg['transfer_enabled'] else 1)
+            await pishi_menu_callback(event)
 
-        @self.bot.on(events.CallbackQuery(pattern=rb"pishi_set_mio_interval_(\d+)"))
-        async def pishi_set_mio_interval(event):
+        @self.bot.on(events.CallbackQuery(pattern=b"pishi_set_mio_p"))
+        async def pishi_set_mio_p(event):
+            if not await self._check_admin_access(event): return
+            await event.answer()
+            self.user_states[event.sender_id] = {'step': 'pishi_p_mio_interval'}
+            await event.edit(
+                "⏱ **زمانبندی میو**\n\nهر چند دقیقه میو بزنه؟\nمثال: `5`",
+                buttons=Button.inline("❌ لغو", b"pishi_menu")
+            )
+
+        @self.bot.on(events.CallbackQuery(pattern=b"pishi_set_fish_p"))
+        async def pishi_set_fish_p(event):
+            if not await self._check_admin_access(event): return
+            await event.answer()
+            self.user_states[event.sender_id] = {'step': 'pishi_p_fish_interval'}
+            await event.edit(
+                "⏱ **زمانبندی ماهی**\n\nهر چند دقیقه ماهی بزنه؟\nمثال: `60`",
+                buttons=Button.inline("❌ لغو", b"pishi_menu")
+            )
+
+        @self.bot.on(events.CallbackQuery(pattern=b"pishi_set_trans_p"))
+        async def pishi_set_trans_p(event):
             if not await self._check_admin_access(event): return
             await event.answer()
             user_id = event.sender_id
-            account_id = int(event.pattern_match.group(1))
-            self.user_states[user_id] = {
-                'step': 'pishi_input_mio_interval',
-                'pishi_account_id': account_id
-            }
+            cfg = await self.db.get_pishi_panel(user_id)
+            target = f"msg #{cfg['transfer_target_msg_id']}" if cfg and cfg.get('transfer_target_msg_id') else "تنظیم نشده"
+            hour = cfg.get('transfer_hour', 0) if cfg else 0
+            self.user_states[user_id] = {'step': 'pishi_p_trans_settings'}
             await event.edit(
-                "⏱ **تنظیم فاصله میو**\n\nهر چند دقیقه میو بزنه؟ (عدد بفرست)\nمثال: `5`",
-                buttons=Button.inline("❌ لغو", b"cancel")
+                f"⚙️ **تنظیمات انتقال اتومات**\n\n"
+                f"🕐 ساعت فعلی: {hour:02d}:00\n"
+                f"🎯 target فعلی: {target}\n\n"
+                f"یکی از موارد زیر را ارسال کنید:\n"
+                f"• لینک پیام target: `https://t.me/meavmeacv/113309`\n"
+                f"• ساعت انتقال: `hour:0` (نیمه‌شب) یا `hour:23`",
+                buttons=Button.inline("❌ لغو", b"pishi_menu")
             )
 
-        @self.bot.on(events.CallbackQuery(pattern=rb"pishi_set_fish_interval_(\d+)"))
-        async def pishi_set_fish_interval(event):
-            if not await self._check_admin_access(event): return
-            await event.answer()
-            user_id = event.sender_id
-            account_id = int(event.pattern_match.group(1))
-            self.user_states[user_id] = {
-                'step': 'pishi_input_fish_interval',
-                'pishi_account_id': account_id
-            }
-            await event.edit(
-                "⏱ **تنظیم فاصله ماهی**\n\nهر چند دقیقه ماهی بزنه؟ (عدد بفرست)\nمثال: `60`",
-                buttons=Button.inline("❌ لغو", b"cancel")
-            )
-
-        @self.bot.on(events.CallbackQuery(pattern=rb"pishi_set_transfer_hour_(\d+)"))
-        async def pishi_set_transfer_hour(event):
-            if not await self._check_admin_access(event): return
-            await event.answer()
-            user_id = event.sender_id
-            account_id = int(event.pattern_match.group(1))
-            self.user_states[user_id] = {
-                'step': 'pishi_input_transfer_hour',
-                'pishi_account_id': account_id
-            }
-            await event.edit(
-                "🕐 **تنظیم ساعت انتقال**\n\nساعت انتقال شبانه (0-23):\nمثال: `0` برای نیمه‌شب",
-                buttons=Button.inline("❌ لغو", b"cancel")
-            )
-
-        @self.bot.on(events.CallbackQuery(pattern=rb"pishi_set_target_(\d+)"))
-        async def pishi_set_target(event):
-            if not await self._check_admin_access(event): return
-            await event.answer()
-            user_id = event.sender_id
-            account_id = int(event.pattern_match.group(1))
-            self.user_states[user_id] = {
-                'step': 'pishi_input_target',
-                'pishi_account_id': account_id
-            }
-            await event.edit(
-                "🎯 **تنظیم target انتقال**\n\nلینک پیامی که موجودی بهش منتقل بشه:\n\nمثال: `https://t.me/meavmeacv/113309`",
-                buttons=Button.inline("❌ لغو", b"cancel")
-            )
-
-        @self.bot.on(events.CallbackQuery(pattern=b"pishi_global_settings"))
-        async def pishi_global_settings_callback(event):
-            if not await self._check_admin_access(event): return
-            await event.answer()
-            user_id = event.sender_id
-            self.user_states[user_id] = {'step': 'pishi_input_global_group'}
-            await event.edit(
-                "⚙️ **تنظیمات گروه پیشی**\n\nآیدی گروه پیشی را ارسال کنید:\nمثال: `@meavmeacv`",
-                buttons=Button.inline("❌ لغو", b"cancel")
-            )
-
-        @self.bot.on(events.CallbackQuery(pattern=b"pishi_start_all"))
-        async def pishi_start_all_callback(event):
+        @self.bot.on(events.CallbackQuery(pattern=b"pishi_set_count_p"))
+        async def pishi_set_count_p(event):
             if not await self._check_admin_access(event): return
             await event.answer()
             user_id = event.sender_id
             accounts = await self.db.get_accounts(user_id)
-            active = [a for a in accounts if a.status == 'active' and a.session_path]
-            count = 0
-            for acc in active:
-                await self.db.upsert_pishi_automation(user_id, acc.id, is_running=1)
-                if acc.id not in self.pishi_automation_tasks or \
-                   self.pishi_automation_tasks[acc.id].done():
-                    task = asyncio.create_task(self._run_pishi_automation(acc.id, user_id))
-                    self.pishi_automation_tasks[acc.id] = task
-                    count += 1
-            await event.answer(f"▶️ {count} اکانت شروع شد!", alert=True)
-            await pishi_automation_callback(event)
-
-        @self.bot.on(events.CallbackQuery(pattern=b"pishi_stop_all"))
-        async def pishi_stop_all_callback(event):
-            if not await self._check_admin_access(event): return
-            await event.answer()
-            user_id = event.sender_id
-            cfgs = await self.db.get_user_pishi_automations(user_id)
-            count = 0
-            for cfg in cfgs:
-                await self.db.upsert_pishi_automation(user_id, cfg['account_id'], is_running=0)
-                task = self.pishi_automation_tasks.pop(cfg['account_id'], None)
-                if task:
-                    task.cancel()
-                    count += 1
-            await event.answer(f"⏹ {count} اکانت متوقف شد!", alert=True)
-            await pishi_automation_callback(event)
+            total = len([a for a in accounts if a.status == 'active' and a.session_path])
+            self.user_states[user_id] = {'step': 'pishi_p_account_count'}
+            await event.edit(
+                f"👥 **تعداد اکانت**\n\nاکانت‌های فعال: {total}\n\n"
+                f"چند تا استفاده شوند؟\n• عدد (مثلاً `10`) یا `/all`",
+                buttons=Button.inline("❌ لغو", b"pishi_menu")
+            )
 
         @self.bot.on(events.CallbackQuery(pattern=b"pishi_transfer"))
         async def pishi_transfer_callback(event):
@@ -4523,6 +4498,68 @@ class BotHandler:
                     f"✅ گروه پیشی برای همه اکانت‌ها تنظیم شد: `{group_input}`",
                     buttons=Button.inline("🔙 اتوماسیون", b"pishi_automation")
                 )
+
+            elif step == 'pishi_p_mio_interval':
+                try:
+                    val = int(event.message.text.strip())
+                    if val < 1: raise ValueError
+                except ValueError:
+                    await event.respond("❌ عدد معتبر وارد کنید (حداقل ۱)", buttons=Button.inline("❌ لغو", b"pishi_menu"))
+                    return
+                await self.db.upsert_pishi_panel(user_id, mio_interval_minutes=val)
+                del self.user_states[user_id]
+                await event.respond(f"✅ زمان میو: هر {val} دقیقه", buttons=Button.inline("🔙 پنل پیشی", b"pishi_menu"))
+
+            elif step == 'pishi_p_fish_interval':
+                try:
+                    val = int(event.message.text.strip())
+                    if val < 1: raise ValueError
+                except ValueError:
+                    await event.respond("❌ عدد معتبر وارد کنید (حداقل ۱)", buttons=Button.inline("❌ لغو", b"pishi_menu"))
+                    return
+                await self.db.upsert_pishi_panel(user_id, fish_interval_minutes=val)
+                del self.user_states[user_id]
+                await event.respond(f"✅ زمان ماهی: هر {val} دقیقه", buttons=Button.inline("🔙 پنل پیشی", b"pishi_menu"))
+
+            elif step == 'pishi_p_trans_settings':
+                text_in = event.message.text.strip()
+                from src.services.pishi_service import parse_message_link
+                if text_in.lower().startswith('hour:'):
+                    try:
+                        h = int(text_in.split(':')[1])
+                        if h < 0 or h > 23: raise ValueError
+                        await self.db.upsert_pishi_panel(user_id, transfer_hour=h)
+                        del self.user_states[user_id]
+                        await event.respond(f"✅ ساعت انتقال: {h:02d}:00", buttons=Button.inline("🔙 پنل پیشی", b"pishi_menu"))
+                    except (ValueError, IndexError):
+                        await event.respond("❌ فرمت اشتباه. مثال: `hour:0`", buttons=Button.inline("❌ لغو", b"pishi_menu"))
+                else:
+                    _, msg_id = parse_message_link(text_in)
+                    if not msg_id:
+                        await event.respond("❌ لینک نامعتبر! مثال: `https://t.me/meavmeacv/113309`", buttons=Button.inline("❌ لغو", b"pishi_menu"))
+                        return
+                    await self.db.upsert_pishi_panel(user_id, transfer_target_msg_id=msg_id)
+                    del self.user_states[user_id]
+                    await event.respond(f"✅ target انتقال: msg #{msg_id}", buttons=Button.inline("🔙 پنل پیشی", b"pishi_menu"))
+
+            elif step == 'pishi_p_account_count':
+                text_in = event.message.text.strip()
+                accounts = await self.db.get_accounts(user_id)
+                active = [a for a in accounts if a.status == 'active' and a.session_path]
+                if text_in.lower() == '/all':
+                    val = len(active)
+                    label = 'همه'
+                else:
+                    try:
+                        val = int(text_in)
+                        if val < 1 or val > len(active): raise ValueError
+                        label = str(val)
+                    except ValueError:
+                        await event.respond(f"❌ عدد بین 1 تا {len(active)} یا /all", buttons=Button.inline("❌ لغو", b"pishi_menu"))
+                        return
+                await self.db.upsert_pishi_panel(user_id, account_count=val)
+                del self.user_states[user_id]
+                await event.respond(f"✅ تعداد اکانت: {label}", buttons=Button.inline("🔙 پنل پیشی", b"pishi_menu"))
 
             # ─── Pishi Transfer Steps ─────────────────────────────────────────
             elif step == 'pishi_transfer_group':
