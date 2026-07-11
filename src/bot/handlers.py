@@ -642,22 +642,21 @@ class BotHandler:
     
     async def _run_pishi_panel(self, user_id: int):
         """
-        Loop اتوماسیون پیشی per-user:
-        تنظیمات کلی رو می‌خونه و برای N اکانت انتخاب شده:
-        - هر mio_interval_minutes: میو
-        - هر fish_interval_minutes: ماهی
-        - ساعت transfer_hour: انتقال موجودی
-        اکانت‌ها با تاخیر پخش شده در بازه هر تسک اجرا میشن
+        Loop اتوماسیون پیشی per-user.
+        برای هر تسک (میو/ماهی/انتقال):
+        - همه N اکانت انتخاب شده را در بازه زمانی پخش می‌کنه
+        - تاخیر بین هر اکانت = interval / N (حداقل ۵ ثانیه)
+        - بعد از اتمام دور، صبر تا بازه بعدی
         """
         import time
         from datetime import datetime
 
         logger.info(f"[pishi_panel] شروع اتوماسیون user={user_id}")
 
-        # timer آخرین اجرا برای هر اکانت
-        last_mio:   dict = {}   # session_path → float
-        last_fish:  dict = {}
-        last_transfer_date: dict = {}   # session_path → date
+        # زمان آخرین دور کامل برای هر تسک
+        last_mio_round:  float = 0.0
+        last_fish_round: float = 0.0
+        last_transfer_date = None
 
         while True:
             try:
@@ -679,66 +678,65 @@ class BotHandler:
                     await asyncio.sleep(60)
                     continue
 
-                group = cfg['group_username']
-                now = time.time()
-                today = datetime.now().date()
+                group        = cfg['group_username']
+                now          = time.time()
+                today        = datetime.now().date()
                 current_hour = datetime.now().hour
+                n            = len(selected)
 
-                # پخش تسک‌ها در بازه زمانی — تاخیر بین هر اکانت
                 mio_interval_sec  = cfg['mio_interval_minutes'] * 60
                 fish_interval_sec = cfg['fish_interval_minutes'] * 60
-                # تاخیر بین اکانت‌ها = بازه / تعداد اکانت (حداقل ۱۰ ثانیه)
-                acc_delay = max(10, mio_interval_sec // max(len(selected), 1))
 
-                for acc in selected:
-                    sp = acc.session_path
+                # تاخیر بین اکانت‌ها = interval ÷ N (حداقل ۵ ثانیه)
+                mio_delay  = max(5, mio_interval_sec  // n)
+                fish_delay = max(5, fish_interval_sec // n)
 
-                    # ─── میو ──────────────────────────────────────────
-                    if cfg['mio_enabled']:
-                        t_last = last_mio.get(sp, 0)
-                        if now - t_last >= mio_interval_sec:
-                            try:
-                                r = await self.pishi_service.send_mio(sp, group)
-                                status = '✅' if r['success'] else f"❌ {r['message'][:30]}"
-                                logger.info(f"[pishi/mio] {acc.phone} {status}")
-                                last_mio[sp] = time.time()
-                            except Exception as e:
-                                logger.error(f"[pishi/mio] {acc.phone}: {e}")
-                                last_mio[sp] = time.time()
-                            await asyncio.sleep(acc_delay)
+                # ─── میو ──────────────────────────────────────────────
+                if cfg['mio_enabled'] and now - last_mio_round >= mio_interval_sec:
+                    logger.info(f"[pishi/mio] شروع دور جدید — {n} اکانت، تاخیر {mio_delay}s")
+                    for acc in selected:
+                        try:
+                            r = await self.pishi_service.send_mio(acc.session_path, group)
+                            s = '✅' if r['success'] else f"❌ {r['message'][:25]}"
+                            logger.info(f"[pishi/mio] {acc.phone} {s}")
+                        except Exception as e:
+                            logger.error(f"[pishi/mio] {acc.phone}: {e}")
+                        await asyncio.sleep(mio_delay)
+                    last_mio_round = time.time()
 
-                    # ─── ماهی ─────────────────────────────────────────
-                    if cfg['fish_enabled']:
-                        t_last = last_fish.get(sp, 0)
-                        if now - t_last >= fish_interval_sec:
-                            try:
-                                r = await self.pishi_service.send_fish_and_click(sp, group, button_index=1)
-                                status = '✅' if r['success'] else f"❌ {r['message'][:30]}"
-                                logger.info(f"[pishi/fish] {acc.phone} {status}")
-                                last_fish[sp] = time.time()
-                            except Exception as e:
-                                logger.error(f"[pishi/fish] {acc.phone}: {e}")
-                                last_fish[sp] = time.time()
-                            await asyncio.sleep(acc_delay)
+                # ─── ماهی ─────────────────────────────────────────────
+                if cfg['fish_enabled'] and now - last_fish_round >= fish_interval_sec:
+                    logger.info(f"[pishi/fish] شروع دور جدید — {n} اکانت، تاخیر {fish_delay}s")
+                    for acc in selected:
+                        try:
+                            r = await self.pishi_service.send_fish_and_click(
+                                acc.session_path, group, button_index=1)
+                            s = '✅' if r['success'] else f"❌ {r['message'][:25]}"
+                            logger.info(f"[pishi/fish] {acc.phone} {s}")
+                        except Exception as e:
+                            logger.error(f"[pishi/fish] {acc.phone}: {e}")
+                        await asyncio.sleep(fish_delay)
+                    last_fish_round = time.time()
 
-                    # ─── انتقال موجودی ────────────────────────────────
-                    if cfg['transfer_enabled'] and cfg.get('transfer_target_msg_id'):
-                        transfer_hour = cfg.get('transfer_hour', 0)
-                        last_td = last_transfer_date.get(sp)
-                        if last_td != today and current_hour == transfer_hour:
+                # ─── انتقال موجودی ────────────────────────────────────
+                if cfg['transfer_enabled'] and cfg.get('transfer_target_msg_id'):
+                    transfer_hour = cfg.get('transfer_hour', 0)
+                    if last_transfer_date != today and current_hour == transfer_hour:
+                        logger.info(f"[pishi/transfer] شروع دور انتقال — {n} اکانت")
+                        transfer_delay = max(10, 3600 // n)
+                        for acc in selected:
                             try:
                                 r = await self.pishi_service.transfer_balance(
-                                    sp, group, cfg['transfer_target_msg_id']
-                                )
-                                status = '✅' if r.get('final_success') else f"⚠️ {r['message'][:30]}"
-                                logger.info(f"[pishi/transfer] {acc.phone} {status}")
-                                last_transfer_date[sp] = today
+                                    acc.session_path, group,
+                                    cfg['transfer_target_msg_id'])
+                                s = '✅' if r.get('final_success') else f"⚠️ {r['message'][:25]}"
+                                logger.info(f"[pishi/transfer] {acc.phone} {s}")
                             except Exception as e:
                                 logger.error(f"[pishi/transfer] {acc.phone}: {e}")
-                                last_transfer_date[sp] = today
-                            await asyncio.sleep(acc_delay)
+                            await asyncio.sleep(transfer_delay)
+                        last_transfer_date = today
 
-                # صبر ۳۰ ثانیه قبل از چک بعدی
+                # هر ۳۰ ثانیه تایمر رو چک کن
                 await asyncio.sleep(30)
 
             except asyncio.CancelledError:
