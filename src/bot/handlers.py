@@ -1093,7 +1093,8 @@ class BotHandler:
                      Button.inline("🚫 بلاک/انبلاک", b"block_user")],
                     [Button.inline("🎯 سناریو پیشرفته", b"advanced_scenario"),
                      Button.inline("👥 لیچر", b"leecher")],
-                    [Button.inline("🎨 اعمال پروفایل", b"apply_profiles")],
+                    [Button.inline("⏰ سناریو زمانبندی", b"scheduled_scenario"),
+                     Button.inline("🎨 اعمال پروفایل", b"apply_profiles")],
                     [Button.inline("📝 یادداشت‌های من", b"my_notes")],
                     [Button.inline("⚙️ مدیریت ربات", b"bot_management")],
                     [Button.inline("👑 پنل ادمین", b"admin_panel")]
@@ -1128,7 +1129,8 @@ class BotHandler:
                      Button.inline("🚫 بلاک/انبلاک", b"block_user")],
                     [Button.inline("🎯 سناریو پیشرفته", b"advanced_scenario"),
                      Button.inline("👥 لیچر", b"leecher")],
-                    [Button.inline("🎨 اعمال پروفایل", b"apply_profiles")],
+                    [Button.inline("⏰ سناریو زمانبندی", b"scheduled_scenario"),
+                     Button.inline("🎨 اعمال پروفایل", b"apply_profiles")],
                     [Button.inline("📝 یادداشت‌های من", b"my_notes")],
                     [Button.inline("⚙️ مدیریت ربات", b"bot_management")],
                     [Button.inline("👑 پنل ادمین", b"admin_panel")]
@@ -2568,7 +2570,8 @@ class BotHandler:
                      Button.inline("🚫 بلاک/انبلاک", b"block_user")],
                     [Button.inline("🎯 سناریو پیشرفته", b"advanced_scenario"),
                      Button.inline("👥 لیچر", b"leecher")],
-                    [Button.inline("🎨 اعمال پروفایل", b"apply_profiles")],
+                    [Button.inline("⏰ سناریو زمانبندی", b"scheduled_scenario"),
+                     Button.inline("🎨 اعمال پروفایل", b"apply_profiles")],
                     [Button.inline("📝 یادداشت‌های من", b"my_notes")],
                     [Button.inline("⚙️ مدیریت ربات", b"bot_management")],
                     [Button.inline("👑 پنل ادمین", b"admin_panel")]
@@ -2587,7 +2590,8 @@ class BotHandler:
                      Button.inline("🚫 بلاک/انبلاک", b"block_user")],
                     [Button.inline("🎯 سناریو پیشرفته", b"advanced_scenario"),
                      Button.inline("👥 لیچر", b"leecher")],
-                    [Button.inline("🎨 اعمال پروفایل", b"apply_profiles")],
+                    [Button.inline("⏰ سناریو زمانبندی", b"scheduled_scenario"),
+                     Button.inline("🎨 اعمال پروفایل", b"apply_profiles")],
                     [Button.inline("📝 یادداشت‌های من", b"my_notes")],
                     [Button.inline("⚙️ مدیریت ربات", b"bot_management")],
                     [Button.inline("👑 پنل ادمین", b"admin_panel")]
