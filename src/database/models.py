@@ -192,6 +192,28 @@ class Database:
                 )
             """)
 
+            # جدول تنظیمات اتوماسیون پیشی (per account per user)
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS pishi_automation (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    account_id INTEGER NOT NULL,
+                    group_username TEXT NOT NULL DEFAULT '@meavmeacv',
+                    transfer_target_msg_id INTEGER,
+                    mio_enabled INTEGER DEFAULT 1,
+                    mio_interval_minutes INTEGER DEFAULT 5,
+                    fish_enabled INTEGER DEFAULT 1,
+                    fish_interval_minutes INTEGER DEFAULT 60,
+                    transfer_enabled INTEGER DEFAULT 0,
+                    transfer_hour INTEGER DEFAULT 0,
+                    is_running INTEGER DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(user_id, account_id),
+                    FOREIGN KEY (user_id) REFERENCES users (user_id),
+                    FOREIGN KEY (account_id) REFERENCES accounts (id)
+                )
+            """)
+
             await db.commit()
             
             # Migration: اضافه کردن ستون added_by اگر وجود نداره
@@ -660,6 +682,80 @@ class Database:
         except Exception as e:
             print(f"خطا در حذف سناریو: {e}")
             return False
+
+    # ─── Pishi Automation ───────────────────────────────────────────────────
+
+    async def upsert_pishi_automation(self, user_id: int, account_id: int, **kwargs) -> bool:
+        """ایجاد یا بروزرسانی تنظیمات اتوماسیون پیشی برای یک اکانت"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                # چک وجود رکورد
+                async with db.execute(
+                    "SELECT id FROM pishi_automation WHERE user_id=? AND account_id=?",
+                    (user_id, account_id)
+                ) as cur:
+                    row = await cur.fetchone()
+
+                if row:
+                    if kwargs:
+                        sets = ', '.join(f"{k}=?" for k in kwargs)
+                        vals = list(kwargs.values()) + [user_id, account_id]
+                        await db.execute(
+                            f"UPDATE pishi_automation SET {sets} WHERE user_id=? AND account_id=?",
+                            vals
+                        )
+                else:
+                    fields = ['user_id', 'account_id'] + list(kwargs.keys())
+                    placeholders = ','.join('?' for _ in fields)
+                    vals = [user_id, account_id] + list(kwargs.values())
+                    await db.execute(
+                        f"INSERT INTO pishi_automation ({','.join(fields)}) VALUES ({placeholders})",
+                        vals
+                    )
+                await db.commit()
+                return True
+        except Exception as e:
+            print(f"خطا در upsert_pishi_automation: {e}")
+            return False
+
+    async def get_pishi_automation(self, user_id: int, account_id: int) -> Optional[Dict[str, Any]]:
+        """دریافت تنظیمات یک اکانت"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM pishi_automation WHERE user_id=? AND account_id=?",
+                (user_id, account_id)
+            ) as cur:
+                row = await cur.fetchone()
+                return dict(row) if row else None
+
+    async def get_user_pishi_automations(self, user_id: int) -> List[Dict[str, Any]]:
+        """دریافت همه تنظیمات پیشی کاربر"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """SELECT pa.*, a.phone, a.telegram_username
+                   FROM pishi_automation pa
+                   JOIN accounts a ON a.id = pa.account_id
+                   WHERE pa.user_id=?
+                   ORDER BY a.phone""",
+                (user_id,)
+            ) as cur:
+                rows = await cur.fetchall()
+                return [dict(r) for r in rows]
+
+    async def get_all_running_pishi(self) -> List[Dict[str, Any]]:
+        """دریافت همه اتوماسیون‌های در حال اجرا (برای restore بعد از restart)"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """SELECT pa.*, a.phone, a.session_path
+                   FROM pishi_automation pa
+                   JOIN accounts a ON a.id = pa.account_id
+                   WHERE pa.is_running=1"""
+            ) as cur:
+                rows = await cur.fetchall()
+                return [dict(r) for r in rows]
 
     async def save_scenario_progress(self, user_id: int, scenario_text: str, 
                                      last_index: int, total: int) -> bool:

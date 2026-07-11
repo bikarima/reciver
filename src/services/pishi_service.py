@@ -322,3 +322,149 @@ class PishiService:
                 await asyncio.sleep(delay)
 
         return results
+
+    async def send_mio(self, session_path: str, group_username: str, wait_timeout: int = 15) -> Dict:
+        """
+        ارسال 'میو' در گروه و دریافت reply ربات
+        Returns: {'success': bool, 'message': str, 'points': int}
+        """
+        client = None
+        try:
+            session_string = Path(session_path).read_text(encoding='utf-8')
+            client = TelegramClient(StringSession(session_string), self.api_id, self.api_hash)
+            await client.connect()
+            if not await client.is_user_authorized():
+                return {'success': False, 'message': 'سشن نامعتبر', 'points': 0}
+
+            try:
+                group = await client.get_entity(group_username.lstrip('@'))
+            except Exception as e:
+                return {'success': False, 'message': f'گروه پیدا نشد: {e}', 'points': 0}
+
+            try:
+                sent = await client.send_message(group, 'میو')
+            except Exception as e:
+                err = str(e)
+                if 'banned' in err.lower() or 'UserBannedInChannel' in err:
+                    return {'success': False, 'message': 'ban شده', 'points': 0}
+                return {'success': False, 'message': f'خطا: {err[:40]}', 'points': 0}
+
+            sent_id = sent.id
+            elapsed = 0
+            points = 0
+            reply_text = ''
+
+            while elapsed < wait_timeout:
+                await asyncio.sleep(2)
+                elapsed += 2
+                msgs = await client.get_messages(group, limit=10, min_id=sent_id)
+                for msg in msgs:
+                    if msg.id <= sent_id or not msg.text:
+                        continue
+                    reply_to_id = getattr(getattr(msg, 'reply_to', None), 'reply_to_msg_id', None)
+                    if reply_to_id != sent_id:
+                        continue
+                    # استخراج پوینت از پیام مثلاً "122 میو پوینت گرفتی"
+                    m = re.search(r'(\d[\d,،]*)\s*میو پوینت', msg.text)
+                    if m:
+                        points = int(m.group(1).replace(',', '').replace('،', ''))
+                    reply_text = (msg.text or '')[:80]
+                    logger.info(f"[mio] {session_path[-20:]} reply: {reply_text}")
+                    return {'success': True, 'message': reply_text, 'points': points}
+
+            return {'success': False, 'message': f'timeout {wait_timeout}s', 'points': 0}
+
+        except Exception as e:
+            logger.error(f"[mio] خطا: {e}")
+            return {'success': False, 'message': str(e)[:60], 'points': 0}
+        finally:
+            if client:
+                await client.disconnect()
+
+    async def send_fish_and_click(self, session_path: str, group_username: str,
+                                  button_index: int = 1, wait_timeout: int = 25) -> Dict:
+        """
+        ارسال 'ماهی'، منتظر edit شدن پیام ربات، کلیک دکمه button_index
+        ربات پیشی اول یه پیام می‌فرسته (بدون دکمه)، بعد edit می‌کنه و دکمه اضافه می‌کنه
+        Returns: {'success': bool, 'message': str}
+        """
+        client = None
+        try:
+            session_string = Path(session_path).read_text(encoding='utf-8')
+            client = TelegramClient(StringSession(session_string), self.api_id, self.api_hash)
+            await client.connect()
+            if not await client.is_user_authorized():
+                return {'success': False, 'message': 'سشن نامعتبر'}
+
+            try:
+                group = await client.get_entity(group_username.lstrip('@'))
+            except Exception as e:
+                return {'success': False, 'message': f'گروه پیدا نشد: {e}'}
+
+            try:
+                sent = await client.send_message(group, 'ماهی')
+            except Exception as e:
+                err = str(e)
+                if 'banned' in err.lower() or 'UserBannedInChannel' in err:
+                    return {'success': False, 'message': 'ban شده'}
+                return {'success': False, 'message': f'خطا: {err[:40]}'}
+
+            sent_id = sent.id
+            logger.info(f"[fish] {session_path[-20:]} ارسال ماهی msg_id={sent_id}")
+
+            # منتظر reply ربات (اول بدون دکمه، بعد edit با دکمه)
+            elapsed = 0
+            bot_msg_id = None
+
+            # مرحله ۱: پیدا کردن reply ربات
+            while elapsed < wait_timeout and bot_msg_id is None:
+                await asyncio.sleep(2)
+                elapsed += 2
+                msgs = await client.get_messages(group, limit=10, min_id=sent_id)
+                for msg in msgs:
+                    if msg.id <= sent_id:
+                        continue
+                    reply_to_id = getattr(getattr(msg, 'reply_to', None), 'reply_to_msg_id', None)
+                    if reply_to_id == sent_id:
+                        bot_msg_id = msg.id
+                        logger.info(f"[fish] پیام ربات پیدا شد id={bot_msg_id}")
+                        break
+
+            if bot_msg_id is None:
+                return {'success': False, 'message': f'reply ربات نرسید (timeout {wait_timeout}s)'}
+
+            # مرحله ۲: منتظر edit شدن پیام (دکمه اضافه بشه) — حداکثر 65 ثانیه
+            edit_elapsed = 0
+            edit_timeout = 65
+
+            while edit_elapsed < edit_timeout:
+                await asyncio.sleep(3)
+                edit_elapsed += 3
+                try:
+                    fresh = await client.get_messages(group, ids=bot_msg_id)
+                    if fresh and fresh.buttons:
+                        # دکمه پیدا شد
+                        all_buttons = []
+                        for row in fresh.buttons:
+                            for btn in row:
+                                all_buttons.append(btn)
+
+                        if button_index < len(all_buttons):
+                            btn = all_buttons[button_index]
+                            await btn.click()
+                            btn_text = getattr(btn, 'text', '?')
+                            logger.info(f"[fish] کلیک دکمه #{button_index}: {btn_text}")
+                            return {'success': True, 'message': f'ماهی گرفته شد، دکمه کلیک شد: {btn_text}'}
+                        else:
+                            return {'success': False, 'message': f'دکمه #{button_index} وجود ندارد ({len(all_buttons)} دکمه)'}
+                except Exception as e:
+                    logger.warning(f"[fish] خطا در poll edit: {e}")
+
+            return {'success': False, 'message': f'دکمه در {edit_timeout}s ظاهر نشد'}
+
+        except Exception as e:
+            logger.error(f"[fish] خطا: {e}")
+            return {'success': False, 'message': str(e)[:60]}
+        finally:
+            if client:
+                await client.disconnect()
