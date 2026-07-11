@@ -1095,6 +1095,7 @@ class BotHandler:
                      Button.inline("👥 لیچر", b"leecher")],
                     [Button.inline("⏰ سناریو زمانبندی", b"scheduled_scenario"),
                      Button.inline("🎨 اعمال پروفایل", b"apply_profiles")],
+                    [Button.inline("💰 انتقال موجودی", b"pishi_transfer")],
                     [Button.inline("📝 یادداشت‌های من", b"my_notes")],
                     [Button.inline("⚙️ مدیریت ربات", b"bot_management")],
                     [Button.inline("👑 پنل ادمین", b"admin_panel")]
@@ -1131,6 +1132,7 @@ class BotHandler:
                      Button.inline("👥 لیچر", b"leecher")],
                     [Button.inline("⏰ سناریو زمانبندی", b"scheduled_scenario"),
                      Button.inline("🎨 اعمال پروفایل", b"apply_profiles")],
+                    [Button.inline("💰 انتقال موجودی", b"pishi_transfer")],
                     [Button.inline("📝 یادداشت‌های من", b"my_notes")],
                     [Button.inline("⚙️ مدیریت ربات", b"bot_management")],
                     [Button.inline("👑 پنل ادمین", b"admin_panel")]
@@ -2572,6 +2574,7 @@ class BotHandler:
                      Button.inline("👥 لیچر", b"leecher")],
                     [Button.inline("⏰ سناریو زمانبندی", b"scheduled_scenario"),
                      Button.inline("🎨 اعمال پروفایل", b"apply_profiles")],
+                    [Button.inline("💰 انتقال موجودی", b"pishi_transfer")],
                     [Button.inline("📝 یادداشت‌های من", b"my_notes")],
                     [Button.inline("⚙️ مدیریت ربات", b"bot_management")],
                     [Button.inline("👑 پنل ادمین", b"admin_panel")]
@@ -2592,6 +2595,7 @@ class BotHandler:
                      Button.inline("👥 لیچر", b"leecher")],
                     [Button.inline("⏰ سناریو زمانبندی", b"scheduled_scenario"),
                      Button.inline("🎨 اعمال پروفایل", b"apply_profiles")],
+                    [Button.inline("💰 انتقال موجودی", b"pishi_transfer")],
                     [Button.inline("📝 یادداشت‌های من", b"my_notes")],
                     [Button.inline("⚙️ مدیریت ربات", b"bot_management")],
                     [Button.inline("👑 پنل ادمین", b"admin_panel")]
