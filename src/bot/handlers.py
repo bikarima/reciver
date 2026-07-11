@@ -4652,6 +4652,15 @@ class BotHandler:
                     try:
                         session_paths = [acc.session_path for acc in selected]
 
+                        # صبر برای آزاد شدن session lock هایی که سناریو زمانبندی استفاده می‌کنه
+                        for sp in session_paths:
+                            waited = 0
+                            while sp in self.session_locks and waited < 300:
+                                await asyncio.sleep(2)
+                                waited += 2
+                            if waited > 0:
+                                logger.info(f"[pishi_transfer] session {sp[-20:]} {waited}s منتظر ماند")
+
                         async def update_progress(current, total, message):
                             try:
                                 await progress_msg.edit(
