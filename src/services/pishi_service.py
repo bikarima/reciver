@@ -268,6 +268,7 @@ class PishiService:
         workers: int = 1,
         custom_delay: int = None,
         cancel_flag: dict = None,
+        session_locks: set = None,  # session_locks از BotHandler
     ) -> Dict:
         """
         انتقال دسته‌جمعی برای چند اکانت
@@ -287,6 +288,17 @@ class PishiService:
                 break
 
             batch = session_paths[i:i + workers]
+
+            # per-session: صبر کن تا lock آزاد بشه
+            if session_locks:
+                for sp in batch:
+                    waited = 0
+                    while sp in session_locks and waited < 600:
+                        await asyncio.sleep(3)
+                        waited += 3
+                    if waited > 0:
+                        logger.info(f"[bulk_transfer] {Path(sp).name} {waited}s منتظر lock ماند")
+
             tasks = [
                 self.transfer_balance(sp, group_username, target_message_id)
                 for sp in batch
