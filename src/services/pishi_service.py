@@ -426,8 +426,21 @@ class PishiService:
                                 reply_to = getattr(getattr(msg, 'reply_to', None), 'reply_to_msg_id', None)
                                 if reply_to == sent_id:
                                     bot_msg_id = msg.id
+                                    # بررسی اینکه آیا قلاب نداره (باید بخره)
+                                    msg_text = msg.text or ''
+                                    if 'قلاب' in msg_text and msg.buttons:
+                                        # خرید قلاب: کلیک دکمه #0
+                                        flat = [b for row in msg.buttons for b in row]
+                                        if flat:
+                                            await flat[0].click()
+                                            logger.info(f"[acc_loop/fish] 🎣 خرید قلاب: {session_path[-15:]}")
+                                        # بعد از خرید قلاب، ماهی رو دوباره بزن
+                                        await asyncio.sleep(3)
+                                        sent2 = await client.send_message(group, 'ماهی')
+                                        sent_id = sent2.id
+                                        bot_msg_id = None
                                     break
-                            if bot_msg_id: break
+                            if bot_msg_id is not None: break
 
                         # منتظر edit شدن (دکمه اضافه بشه)
                         if bot_msg_id:
