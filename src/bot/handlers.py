@@ -677,7 +677,7 @@ class BotHandler:
 
                 group             = cfg['group_username']
                 n                 = len(selected)
-                workers           = max(1, round(n / 30))  # خودکار: هر ۳۰ اکانت یه worker
+                workers           = max(1, cfg.get('workers', 3))
                 mio_interval_sec  = cfg['mio_interval_minutes'] * 60
                 fish_interval_sec = cfg['fish_interval_minutes'] * 60
                 transfer_enabled  = bool(cfg['transfer_enabled'])
@@ -1990,14 +1990,14 @@ class BotHandler:
                           if cfg.get('transfer_target_msg_id') else "تنظیم نشده"
 
             # محاسبه خودکار workers
-            auto_workers = max(1, round(total_acc / 30))
+            auto_workers = cfg.get('workers', 3)
 
             text = (
                 f"🐱 **پنل اتوماسیون پیشی**\n\n"
                 f"وضعیت: {run_icon}\n"
                 f"📢 گروه: `{cfg['group_username']}`\n"
                 f"👥 اکانت: {acc_count_text}\n"
-                f"⚡ Workers: {auto_workers} (خودکار)\n\n"
+                f"⚡ Workers: {auto_workers}\n\n"
                 f"{mio_icon} **میو** — هر {cfg['mio_interval_minutes']} دقیقه\n"
                 f"{fish_icon} **ماهی** — هر {cfg['fish_interval_minutes']} دقیقه\n"
                 f"{trans_icon} **انتقال اتومات** — ساعت {cfg.get('transfer_hour',0):02d}:00\n"
@@ -2014,7 +2014,8 @@ class BotHandler:
                 [Button.inline(f"{trans_icon} انتقال اتومات", b"pishi_toggle_trans_p"),
                  Button.inline("⚙️ تنظیمات انتقال", b"pishi_set_trans_p")],
                 [Button.inline("👥 تعداد اکانت", b"pishi_set_count_p"),
-                 Button.inline("📢 تغییر گروه", b"pishi_set_group_p")],
+                 Button.inline(f"⚡ Workers: {cfg.get('workers',3)}", b"pishi_set_workers_p")],
+                [Button.inline("📢 تغییر گروه", b"pishi_set_group_p")],
                 [Button.inline("🔙 منوی اصلی", b"back_to_menu")]
             ]
             await event.edit(text, buttons=buttons)
@@ -2132,7 +2133,27 @@ class BotHandler:
         @self.bot.on(events.CallbackQuery(pattern=b"pishi_set_workers_p"))
         async def pishi_set_workers_p(event):
             if not await self._check_admin_access(event): return
-            await event.answer("⚡ Workers خودکار محاسبه می‌شود", alert=True)
+            await event.answer()
+            user_id = event.sender_id
+            cfg = await self.db.get_pishi_panel(user_id)
+            w = cfg.get('workers', 3) if cfg else 3
+            accounts = await self.db.get_accounts(user_id)
+            total = len([a for a in accounts if a.status == 'active' and a.session_path])
+            mio_min = cfg['mio_interval_minutes'] if cfg else 5
+            n_batches = max(1, total // w)
+            batch_delay = max(2, (mio_min * 60) // n_batches)
+            self.user_states[user_id] = {'step': 'pishi_p_workers'}
+            await event.edit(
+                f"⚡ **تنظیم Workers**\n\n"
+                f"👥 اکانت‌های فعال: {total}\n"
+                f"⚡ Workers فعلی: {w}\n"
+                f"⏱ بازه میو: {mio_min} دقیقه\n\n"
+                f"با workers={w}:\n"
+                f"• {n_batches} batch\n"
+                f"• تاخیر بین batch: {batch_delay} ثانیه\n\n"
+                f"عدد جدید workers را ارسال کنید (۱ تا ۲۰):",
+                buttons=Button.inline("❌ لغو", b"pishi_menu")
+            )
 
         @self.bot.on(events.CallbackQuery(pattern=b"pishi_set_group_p"))
         async def pishi_set_group_p(event):
@@ -4615,9 +4636,27 @@ class BotHandler:
                 await event.respond(f"✅ تعداد اکانت: {label}", buttons=Button.inline("🔙 پنل پیشی", b"pishi_menu"))
 
             elif step == 'pishi_p_workers':
-                # workers دیگه قابل تنظیم نیست - خودکاره
-                await event.respond("⚡ Workers خودکار محاسبه می‌شود", buttons=Button.inline("🔙 پنل پیشی", b"pishi_menu"))
+                try:
+                    val = int(event.message.text.strip())
+                    if val < 1 or val > 20: raise ValueError
+                except ValueError:
+                    await event.respond("❌ عدد بین 1 تا 20 وارد کنید", buttons=Button.inline("❌ لغو", b"pishi_menu"))
+                    return
+                await self.db.upsert_pishi_panel(user_id, workers=val)
                 del self.user_states[user_id]
+                cfg = await self.db.get_pishi_panel(user_id)
+                accounts = await self.db.get_accounts(user_id)
+                n = cfg.get('account_count') or len([a for a in accounts if a.status == 'active'])
+                mio_sec = cfg['mio_interval_minutes'] * 60
+                n_batches = max(1, int(n) // val)
+                stagger = max(2, mio_sec // n_batches)
+                await event.respond(
+                    f"✅ Workers تنظیم شد: {val}\n\n"
+                    f"📊 با {n} اکانت و بازه {cfg['mio_interval_minutes']}دق:\n"
+                    f"• {n_batches} دسته\n"
+                    f"• تاخیر بین دسته‌ها: {stagger} ثانیه",
+                    buttons=Button.inline("🔙 پنل پیشی", b"pishi_menu")
+                )
 
             elif step == 'pishi_p_group':
                 group_input = event.message.text.strip()
