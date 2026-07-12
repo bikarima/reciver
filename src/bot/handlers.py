@@ -676,13 +676,13 @@ class BotHandler:
                     continue
 
                 group             = cfg['group_username']
+                n                 = len(selected)
                 workers           = max(1, round(n / 30))  # خودکار: هر ۳۰ اکانت یه worker
                 mio_interval_sec  = cfg['mio_interval_minutes'] * 60
                 fish_interval_sec = cfg['fish_interval_minutes'] * 60
                 transfer_enabled  = bool(cfg['transfer_enabled'])
                 transfer_target   = cfg.get('transfer_target_msg_id')
                 transfer_hour     = cfg.get('transfer_hour', 0)
-                n                 = len(selected)
 
                 # تاخیر stagger بین راه‌اندازی اکانت‌ها
                 # هدف: همه N اکانت در بازه mio_interval پخش بشن
