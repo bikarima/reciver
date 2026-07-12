@@ -642,24 +642,21 @@ class BotHandler:
     
     async def _run_pishi_panel(self, user_id: int):
         """
-        Loop اتوماسیون پیشی per-user.
-        برای هر تسک (میو/ماهی/انتقال):
-        - همه N اکانت انتخاب شده را در بازه زمانی پخش می‌کنه
-        - تاخیر بین هر اکانت = interval / N (حداقل ۵ ثانیه)
-        - بعد از اتمام دور، صبر تا بازه بعدی
+        مدیر اتوماسیون پیشی per-user:
+        - N اکانت انتخاب می‌کنه
+        - با stagger delay یه task per-account می‌سازه
+        - هر task loop مستقل با timer داخلی داره
         """
         import time
-        from datetime import datetime
 
-        logger.info(f"[pishi_panel] شروع اتوماسیون user={user_id}")
+        logger.info(f"[pishi_panel] شروع مدیر user={user_id}")
 
-        # زمان آخرین دور کامل برای هر تسک
-        last_mio_round:  float = 0.0
-        last_fish_round: float = 0.0
-        last_transfer_date = None
+        # نگه‌داری task های اکانت‌ها
+        acc_tasks: dict = {}   # session_path → Task
+        acc_stop_flags: dict = {}  # session_path → {'stop': bool}
 
-        while True:
-            try:
+        try:
+            while True:
                 cfg = await self.db.get_pishi_panel(user_id)
                 if not cfg or not cfg['is_running']:
                     logger.info(f"[pishi_panel] user={user_id} متوقف شد")
@@ -678,73 +675,67 @@ class BotHandler:
                     await asyncio.sleep(60)
                     continue
 
-                group        = cfg['group_username']
-                now          = time.time()
-                today        = datetime.now().date()
-                current_hour = datetime.now().hour
-                n            = len(selected)
-
+                group             = cfg['group_username']
+                workers           = max(1, cfg.get('workers', 3))
                 mio_interval_sec  = cfg['mio_interval_minutes'] * 60
                 fish_interval_sec = cfg['fish_interval_minutes'] * 60
+                transfer_enabled  = bool(cfg['transfer_enabled'])
+                transfer_target   = cfg.get('transfer_target_msg_id')
+                transfer_hour     = cfg.get('transfer_hour', 0)
+                n                 = len(selected)
 
-                # تاخیر بین اکانت‌ها = interval ÷ N (حداقل ۵ ثانیه)
-                mio_delay  = max(5, mio_interval_sec  // n)
-                fish_delay = max(5, fish_interval_sec // n)
+                # تاخیر stagger بین راه‌اندازی اکانت‌ها
+                # هدف: همه N اکانت در بازه mio_interval پخش بشن
+                n_batches     = max(1, n // workers)
+                stagger_delay = max(2, mio_interval_sec // n_batches)
 
-                # ─── میو ──────────────────────────────────────────────
-                if cfg['mio_enabled'] and now - last_mio_round >= mio_interval_sec:
-                    logger.info(f"[pishi/mio] شروع دور جدید — {n} اکانت، تاخیر {mio_delay}s")
-                    for acc in selected:
-                        try:
-                            r = await self.pishi_service.send_mio(acc.session_path, group)
-                            s = '✅' if r['success'] else f"❌ {r['message'][:25]}"
-                            logger.info(f"[pishi/mio] {acc.phone} {s}")
-                        except Exception as e:
-                            logger.error(f"[pishi/mio] {acc.phone}: {e}")
-                        await asyncio.sleep(mio_delay)
-                    last_mio_round = time.time()
+                # راه‌اندازی task برای اکانت‌های جدید
+                for idx, acc in enumerate(selected):
+                    sp = acc.session_path
+                    if sp not in acc_tasks or acc_tasks[sp].done():
+                        stop_flag = {'stop': False}
+                        acc_stop_flags[sp] = stop_flag
 
-                # ─── ماهی ─────────────────────────────────────────────
-                if cfg['fish_enabled'] and now - last_fish_round >= fish_interval_sec:
-                    logger.info(f"[pishi/fish] شروع دور جدید — {n} اکانت، تاخیر {fish_delay}s")
-                    for acc in selected:
-                        try:
-                            r = await self.pishi_service.send_fish_and_click(
-                                acc.session_path, group, button_index=1)
-                            s = '✅' if r['success'] else f"❌ {r['message'][:25]}"
-                            logger.info(f"[pishi/fish] {acc.phone} {s}")
-                        except Exception as e:
-                            logger.error(f"[pishi/fish] {acc.phone}: {e}")
-                        await asyncio.sleep(fish_delay)
-                    last_fish_round = time.time()
+                        # محاسبه initial delay این اکانت
+                        batch_num    = idx // workers
+                        initial_wait = batch_num * stagger_delay
 
-                # ─── انتقال موجودی ────────────────────────────────────
-                if cfg['transfer_enabled'] and cfg.get('transfer_target_msg_id'):
-                    transfer_hour = cfg.get('transfer_hour', 0)
-                    if last_transfer_date != today and current_hour == transfer_hour:
-                        logger.info(f"[pishi/transfer] شروع دور انتقال — {n} اکانت")
-                        transfer_delay = max(10, 3600 // n)
-                        for acc in selected:
-                            try:
-                                r = await self.pishi_service.transfer_balance(
-                                    acc.session_path, group,
-                                    cfg['transfer_target_msg_id'])
-                                s = '✅' if r.get('final_success') else f"⚠️ {r['message'][:25]}"
-                                logger.info(f"[pishi/transfer] {acc.phone} {s}")
-                            except Exception as e:
-                                logger.error(f"[pishi/transfer] {acc.phone}: {e}")
-                            await asyncio.sleep(transfer_delay)
-                        last_transfer_date = today
+                        async def start_acc(session_p, flag, delay, g=group):
+                            if delay > 0:
+                                await asyncio.sleep(delay)
+                            if not flag.get('stop'):
+                                await self.pishi_service.run_account_loop(
+                                    session_path=session_p,
+                                    group_username=g,
+                                    mio_enabled=bool(cfg['mio_enabled']),
+                                    mio_interval_sec=mio_interval_sec,
+                                    fish_enabled=bool(cfg['fish_enabled']),
+                                    fish_interval_sec=fish_interval_sec,
+                                    transfer_enabled=transfer_enabled,
+                                    transfer_target_msg_id=transfer_target,
+                                    transfer_hour=transfer_hour,
+                                    stop_flag=flag,
+                                )
 
-                # هر ۳۰ ثانیه تایمر رو چک کن
-                await asyncio.sleep(30)
+                        task = asyncio.create_task(start_acc(sp, stop_flag, initial_wait))
+                        acc_tasks[sp] = task
+                        logger.info(f"[pishi_panel] اکانت {acc.phone} راه‌اندازی شد (delay={initial_wait}s)")
 
-            except asyncio.CancelledError:
-                logger.info(f"[pishi_panel] user={user_id} لغو شد")
-                break
-            except Exception as e:
-                logger.error(f"[pishi_panel] user={user_id} خطا: {e}")
+                # هر ۶۰ ثانیه وضعیت رو چک کن
                 await asyncio.sleep(60)
+
+        except asyncio.CancelledError:
+            logger.info(f"[pishi_panel] user={user_id} لغو شد")
+        except Exception as e:
+            logger.error(f"[pishi_panel] user={user_id} خطا: {e}")
+        finally:
+            # متوقف کردن همه task های اکانت
+            for sp, flag in acc_stop_flags.items():
+                flag['stop'] = True
+            for sp, task in acc_tasks.items():
+                if not task.done():
+                    task.cancel()
+            logger.info(f"[pishi_panel] user={user_id} همه اکانت‌ها متوقف شدند")
 
     async def _run_pishi_automation(self, account_id: int, user_id: int):
         """
@@ -887,24 +878,45 @@ class BotHandler:
                         success_count = 0
                         fail_count = 0
                         
-                        for account in selected:
-                            for bot_data in bots_scenarios:
-                                try:
-                                    result = await self.bot_automation.execute_scenario(
-                                        account.session_path,
-                                        bot_data['bot_username'],
-                                        bot_data['scenario'],
-                                        db=self.db
-                                    )
-                                    if result.get('success'):
-                                        success_count += 1
-                                    else:
-                                        fail_count += 1
-                                except Exception as e:
-                                    fail_count += 1
-                                    logger.error(f"خطا در اجرای scheduled scenario #{schedule_id}: {e}")
+                        # محاسبه تاخیر هوشمند بین batch‌ها
+                        # هدف: همه اکانت‌ها در بازه interval تقسیم بشن
+                        n_accounts = len(selected)
+                        interval_sec = interval_minutes * 60
+                        n_batches = max(1, n_accounts // workers)
+                        batch_delay = max(2, interval_sec // n_batches)
+                        
+                        logger.info(f"[scheduled #{schedule_id}] {n_accounts} اکانت، workers={workers}, تاخیر بین batch={batch_delay}s")
+                        
+                        for batch_start in range(0, n_accounts, workers):
+                            batch = selected[batch_start:batch_start + workers]
                             
-                            await asyncio.sleep(2)  # تاخیر کوچک بین اکانت‌ها
+                            # اجرای موازی batch
+                            batch_tasks = []
+                            for account in batch:
+                                async def run_account(acc, bots=bots_scenarios):
+                                    nonlocal success_count, fail_count
+                                    for bot_data in bots:
+                                        try:
+                                            result = await self.bot_automation.execute_scenario(
+                                                acc.session_path,
+                                                bot_data['bot_username'],
+                                                bot_data['scenario'],
+                                                db=self.db
+                                            )
+                                            if result.get('success'):
+                                                success_count += 1
+                                            else:
+                                                fail_count += 1
+                                        except Exception as e:
+                                            fail_count += 1
+                                            logger.error(f"خطا در سناریو #{schedule_id} acc={acc.phone}: {e}")
+                                batch_tasks.append(run_account(account))
+                            
+                            await asyncio.gather(*batch_tasks, return_exceptions=True)
+                            
+                            # تاخیر بین batch‌ها (به جز آخرین)
+                            if batch_start + workers < n_accounts:
+                                await asyncio.sleep(batch_delay)
                         
                         # اطلاع‌رسانی به کاربر
                         try:
@@ -1096,6 +1108,7 @@ class BotHandler:
                     [Button.inline("⏰ سناریو زمانبندی", b"scheduled_scenario"),
                      Button.inline("🎨 اعمال پروفایل", b"apply_profiles")],
                     [Button.inline("💰 انتقال موجودی", b"pishi_transfer")],
+                    [Button.inline("🐱 پیشی", b"pishi_menu")],
                     [Button.inline("📝 یادداشت‌های من", b"my_notes")],
                     [Button.inline("⚙️ مدیریت ربات", b"bot_management")],
                     [Button.inline("👑 پنل ادمین", b"admin_panel")]
@@ -1133,6 +1146,7 @@ class BotHandler:
                     [Button.inline("⏰ سناریو زمانبندی", b"scheduled_scenario"),
                      Button.inline("🎨 اعمال پروفایل", b"apply_profiles")],
                     [Button.inline("💰 انتقال موجودی", b"pishi_transfer")],
+                    [Button.inline("🐱 پیشی", b"pishi_menu")],
                     [Button.inline("📝 یادداشت‌های من", b"my_notes")],
                     [Button.inline("⚙️ مدیریت ربات", b"bot_management")],
                     [Button.inline("👑 پنل ادمین", b"admin_panel")]
@@ -1995,7 +2009,8 @@ class BotHandler:
                  Button.inline("⏱ زمان ماهی", b"pishi_set_fish_p")],
                 [Button.inline(f"{trans_icon} انتقال اتومات", b"pishi_toggle_trans_p"),
                  Button.inline("⚙️ تنظیمات انتقال", b"pishi_set_trans_p")],
-                [Button.inline("👥 تعداد اکانت", b"pishi_set_count_p")],
+                [Button.inline("👥 تعداد اکانت", b"pishi_set_count_p"),
+                 Button.inline(f"⚡ Workers: {cfg.get('workers',3)}", b"pishi_set_workers_p")],
                 [Button.inline("🔙 منوی اصلی", b"back_to_menu")]
             ]
             await event.edit(text, buttons=buttons)
@@ -2107,6 +2122,30 @@ class BotHandler:
             await event.edit(
                 f"👥 **تعداد اکانت**\n\nاکانت‌های فعال: {total}\n\n"
                 f"چند تا استفاده شوند؟\n• عدد (مثلاً `10`) یا `/all`",
+                buttons=Button.inline("❌ لغو", b"pishi_menu")
+            )
+
+        @self.bot.on(events.CallbackQuery(pattern=b"pishi_set_workers_p"))
+        async def pishi_set_workers_p(event):
+            if not await self._check_admin_access(event): return
+            await event.answer()
+            user_id = event.sender_id
+            accounts = await self.db.get_accounts(user_id)
+            total = len([a for a in accounts if a.status == 'active' and a.session_path])
+            cfg = await self.db.get_pishi_panel(user_id)
+            w = cfg.get('workers', 3) if cfg else 3
+            # محاسبه تاخیر پیشنهادی
+            mio_min = cfg['mio_interval_minutes'] if cfg else 5
+            self.user_states[user_id] = {'step': 'pishi_p_workers'}
+            await event.edit(
+                f"⚡ **تعداد همزمان (Workers)**\n\n"
+                f"👥 اکانت‌های فعال: {total}\n"
+                f"⏱ بازه میو: {mio_min} دقیقه\n"
+                f"⚡ Workers فعلی: {w}\n\n"
+                f"با workers={w}:\n"
+                f"• {max(1, total // w)} batch\n"
+                f"• تاخیر بین batch: {max(2, (mio_min*60) // max(1, total // w))} ثانیه\n\n"
+                f"عدد workers را ارسال کنید (۱ تا ۱۰):",
                 buttons=Button.inline("❌ لغو", b"pishi_menu")
             )
 
@@ -2575,6 +2614,7 @@ class BotHandler:
                     [Button.inline("⏰ سناریو زمانبندی", b"scheduled_scenario"),
                      Button.inline("🎨 اعمال پروفایل", b"apply_profiles")],
                     [Button.inline("💰 انتقال موجودی", b"pishi_transfer")],
+                    [Button.inline("🐱 پیشی", b"pishi_menu")],
                     [Button.inline("📝 یادداشت‌های من", b"my_notes")],
                     [Button.inline("⚙️ مدیریت ربات", b"bot_management")],
                     [Button.inline("👑 پنل ادمین", b"admin_panel")]
@@ -2596,6 +2636,7 @@ class BotHandler:
                     [Button.inline("⏰ سناریو زمانبندی", b"scheduled_scenario"),
                      Button.inline("🎨 اعمال پروفایل", b"apply_profiles")],
                     [Button.inline("💰 انتقال موجودی", b"pishi_transfer")],
+                    [Button.inline("🐱 پیشی", b"pishi_menu")],
                     [Button.inline("📝 یادداشت‌های من", b"my_notes")],
                     [Button.inline("⚙️ مدیریت ربات", b"bot_management")],
                     [Button.inline("👑 پنل ادمین", b"admin_panel")]
@@ -4572,6 +4613,30 @@ class BotHandler:
                 await self.db.upsert_pishi_panel(user_id, account_count=val)
                 del self.user_states[user_id]
                 await event.respond(f"✅ تعداد اکانت: {label}", buttons=Button.inline("🔙 پنل پیشی", b"pishi_menu"))
+
+            elif step == 'pishi_p_workers':
+                try:
+                    val = int(event.message.text.strip())
+                    if val < 1 or val > 10: raise ValueError
+                except ValueError:
+                    await event.respond("❌ عدد بین 1 تا 10 وارد کنید", buttons=Button.inline("❌ لغو", b"pishi_menu"))
+                    return
+                await self.db.upsert_pishi_panel(user_id, workers=val)
+                del self.user_states[user_id]
+                # نمایش محاسبه تاخیر
+                cfg = await self.db.get_pishi_panel(user_id)
+                accounts = await self.db.get_accounts(user_id)
+                n = cfg.get('account_count') or len([a for a in accounts if a.status == 'active'])
+                mio_sec = cfg['mio_interval_minutes'] * 60
+                n_batches = max(1, n // val)
+                batch_delay = max(2, mio_sec // n_batches)
+                await event.respond(
+                    f"✅ Workers: {val}\n\n"
+                    f"📊 با {n} اکانت و بازه {cfg['mio_interval_minutes']}دق:\n"
+                    f"• {n_batches} batch\n"
+                    f"• تاخیر بین batch: {batch_delay} ثانیه",
+                    buttons=Button.inline("🔙 پنل پیشی", b"pishi_menu")
+                )
 
             # ─── Pishi Transfer Steps ─────────────────────────────────────────
             elif step == 'pishi_transfer_group':

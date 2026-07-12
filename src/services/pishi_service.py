@@ -335,7 +335,176 @@ class PishiService:
 
         return results
 
-    async def send_mio(self, session_path: str, group_username: str, wait_timeout: int = 15) -> Dict:
+    async def run_account_loop(
+        self,
+        session_path: str,
+        group_username: str,
+        mio_enabled: bool,
+        mio_interval_sec: int,
+        fish_enabled: bool,
+        fish_interval_sec: int,
+        transfer_enabled: bool,
+        transfer_target_msg_id: int,
+        transfer_hour: int,
+        stop_flag: dict,  # {'stop': False}
+        fish_button_index: int = 1,
+    ):
+        """
+        Loop مستقل برای یک اکانت — همه کارها در یه session.
+        هر ۳۰ ثانیه تایمر چک میشه، اگه تایم رسید کار انجام میشه.
+        """
+        import time
+        from datetime import datetime
+
+        client = None
+        try:
+            session_string = Path(session_path).read_text(encoding='utf-8')
+            client = TelegramClient(
+                StringSession(session_string),
+                self.api_id,
+                self.api_hash
+            )
+            await client.connect()
+
+            if not await client.is_user_authorized():
+                logger.warning(f"[acc_loop] سشن نامعتبر: {session_path[-20:]}")
+                return
+
+            try:
+                group = await client.get_entity(group_username.lstrip('@'))
+            except Exception as e:
+                logger.error(f"[acc_loop] گروه پیدا نشد: {e}")
+                return
+
+            logger.info(f"[acc_loop] شروع loop: {session_path[-25:]}")
+
+            last_mio      = 0.0
+            last_fish     = 0.0
+            last_transfer_date = None
+
+            while not stop_flag.get('stop'):
+                now          = time.time()
+                today        = datetime.now().date()
+                current_hour = datetime.now().hour
+
+                # ─── میو ──────────────────────────────────────────────
+                if mio_enabled and now - last_mio >= mio_interval_sec:
+                    try:
+                        sent = await client.send_message(group, 'میو')
+                        sent_id = sent.id
+                        # صبر برای reply
+                        for _ in range(8):
+                            await asyncio.sleep(2)
+                            msgs = await client.get_messages(group, limit=8, min_id=sent_id)
+                            found = False
+                            for msg in msgs:
+                                if msg.id <= sent_id or not msg.text: continue
+                                reply_to = getattr(getattr(msg, 'reply_to', None), 'reply_to_msg_id', None)
+                                if reply_to == sent_id:
+                                    logger.info(f"[acc_loop/mio] ✅ {session_path[-15:]}: {msg.text[:40]}")
+                                    found = True
+                                    break
+                            if found: break
+                        last_mio = time.time()
+                    except Exception as e:
+                        logger.error(f"[acc_loop/mio] {session_path[-15:]}: {e}")
+                        last_mio = time.time()
+
+                # ─── ماهی ─────────────────────────────────────────────
+                if fish_enabled and now - last_fish >= fish_interval_sec:
+                    try:
+                        sent = await client.send_message(group, 'ماهی')
+                        sent_id = sent.id
+                        bot_msg_id = None
+
+                        # پیدا کردن reply ربات
+                        for _ in range(12):
+                            await asyncio.sleep(2)
+                            msgs = await client.get_messages(group, limit=8, min_id=sent_id)
+                            for msg in msgs:
+                                if msg.id <= sent_id: continue
+                                reply_to = getattr(getattr(msg, 'reply_to', None), 'reply_to_msg_id', None)
+                                if reply_to == sent_id:
+                                    bot_msg_id = msg.id
+                                    break
+                            if bot_msg_id: break
+
+                        # منتظر edit شدن (دکمه اضافه بشه)
+                        if bot_msg_id:
+                            for _ in range(22):
+                                await asyncio.sleep(3)
+                                fresh = await client.get_messages(group, ids=bot_msg_id)
+                                if fresh and fresh.buttons:
+                                    flat = [b for row in fresh.buttons for b in row]
+                                    if fish_button_index < len(flat):
+                                        await flat[fish_button_index].click()
+                                        logger.info(f"[acc_loop/fish] ✅ {session_path[-15:]}: {flat[fish_button_index].text}")
+                                    break
+                        last_fish = time.time()
+                    except Exception as e:
+                        logger.error(f"[acc_loop/fish] {session_path[-15:]}: {e}")
+                        last_fish = time.time()
+
+                # ─── انتقال موجودی ────────────────────────────────────
+                if transfer_enabled and transfer_target_msg_id and \
+                   last_transfer_date != today and current_hour == transfer_hour:
+                    try:
+                        # گرفتن موجودی
+                        sent = await client.send_message(group, 'میوهام')
+                        sent_id = sent.id
+                        balance = None
+
+                        for _ in range(15):
+                            await asyncio.sleep(2)
+                            msgs = await client.get_messages(group, limit=8, min_id=sent_id)
+                            for msg in msgs:
+                                if msg.id <= sent_id or not msg.text: continue
+                                reply_to = getattr(getattr(msg, 'reply_to', None), 'reply_to_msg_id', None)
+                                if reply_to == sent_id:
+                                    balance = parse_mio_balance(msg.text)
+                                    break
+                            if balance is not None: break
+
+                        if balance and balance > 0:
+                            # ارسال دستور انتقال
+                            t_sent = await client.send_message(
+                                group, f'انتقال میویی {balance}',
+                                reply_to=transfer_target_msg_id
+                            )
+                            t_id = t_sent.id
+
+                            # منتظر تایید
+                            for _ in range(10):
+                                await asyncio.sleep(2)
+                                new_msgs = await client.get_messages(group, limit=8, min_id=t_id)
+                                for msg in new_msgs:
+                                    if msg.id <= t_id or not msg.buttons: continue
+                                    reply_to = getattr(getattr(msg, 'reply_to', None), 'reply_to_msg_id', None)
+                                    if reply_to == t_id:
+                                        flat = [b for row in msg.buttons for b in row]
+                                        if flat:
+                                            await flat[0].click()
+                                            logger.info(f"[acc_loop/transfer] ✅ {session_path[-15:]}: {balance:,}")
+                                        break
+
+                        last_transfer_date = today
+                    except Exception as e:
+                        logger.error(f"[acc_loop/transfer] {session_path[-15:]}: {e}")
+                        last_transfer_date = today
+
+                # صبر ۳۰ ثانیه قبل از چک بعدی
+                await asyncio.sleep(30)
+
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.error(f"[acc_loop] خطا {session_path[-15:]}: {e}")
+        finally:
+            if client:
+                try:
+                    await client.disconnect()
+                except: pass
+            logger.info(f"[acc_loop] پایان: {session_path[-25:]}")
         """
         ارسال 'میو' در گروه و دریافت reply ربات
         Returns: {'success': bool, 'message': str, 'points': int}

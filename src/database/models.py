@@ -199,6 +199,7 @@ class Database:
                     user_id INTEGER NOT NULL UNIQUE,
                     group_username TEXT NOT NULL DEFAULT '@meavmeacv',
                     account_count INTEGER DEFAULT NULL,
+                    workers INTEGER DEFAULT 3,
                     mio_enabled INTEGER DEFAULT 1,
                     mio_interval_minutes INTEGER DEFAULT 5,
                     fish_enabled INTEGER DEFAULT 1,
@@ -257,12 +258,12 @@ class Database:
             except:
                 pass  # ستون از قبل وجود داره
             
-            # Migration: اضافه کردن ستون password اگر وجود نداره
+            # Migration: workers به pishi_panel
             try:
-                await db.execute("ALTER TABLE accounts ADD COLUMN password TEXT")
+                await db.execute("ALTER TABLE pishi_panel ADD COLUMN workers INTEGER DEFAULT 3")
                 await db.commit()
             except:
-                pass  # ستون از قبل وجود داره
+                pass
     
     async def add_user(self, user: User) -> bool:
         """افزودن یا بروزرسانی کاربر"""
