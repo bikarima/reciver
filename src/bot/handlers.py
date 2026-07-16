@@ -864,14 +864,20 @@ class BotHandler:
                     # اجرای سناریو
                     try:
                         lines = scenario_text.split('\n')
-                        bot_count = sum(1 for line in lines if line.strip().startswith('@'))
-                        
+
+                        def is_target_line(line):
+                            s = line.strip()
+                            return (s.startswith('@') or 't.me/' in s or
+                                    (s.startswith('+') and len(s) > 5))
+
+                        bot_count = sum(1 for line in lines if is_target_line(line))
+
                         if bot_count > 1:
                             bots_scenarios = self.bot_automation.parse_multi_bot_scenario(scenario_text)
                         else:
-                            first_line = next((l.strip() for l in lines if l.strip().startswith('@')), '')
-                            bot_username = first_line.lstrip('@')
-                            scenario_lines = [l for l in lines if not l.strip().startswith('@')]
+                            first_line = next((l.strip() for l in lines if is_target_line(l)), '')
+                            bot_username = first_line  # کامل پاس بده
+                            scenario_lines = [l for l in lines if not is_target_line(l)]
                             parsed_scenario = self.bot_automation.parse_scenario('\n'.join(scenario_lines))
                             bots_scenarios = [{'bot_username': bot_username, 'scenario': parsed_scenario}]
                         
@@ -4842,10 +4848,18 @@ class BotHandler:
             elif step == 'sched_scenario':
                 scenario_text = event.message.text.strip()
                 lines = scenario_text.split('\n')
-                bot_count = sum(1 for line in lines if line.strip().startswith('@'))
+
+                def _has_target(line):
+                    s = line.strip()
+                    return s.startswith('@') or 't.me/' in s or (s.startswith('+') and len(s) > 5)
+
+                bot_count = sum(1 for line in lines if _has_target(line))
                 if bot_count == 0:
                     await event.respond(
-                        "❌ سناریو باید با یوزرنیم ربات شروع شود! (مثال: @bot_name)",
+                        "❌ سناریو باید با آدرس گروه/ربات شروع شود!\n\n"
+                        "مثال‌ها:\n"
+                        "`@bot_name`\n"
+                        "`https://t.me/+hashcode` (گروه خصوصی)",
                         buttons=Button.inline("❌ لغو", b"cancel")
                     )
                     return
@@ -4935,13 +4949,19 @@ class BotHandler:
                 # دریافت سناریو
                 scenario_text = event.message.text.strip()
                 
-                # بررسی اینکه آیا چند ربات داریم یا یک ربات
+                # بررسی اینکه آیا چند ربات/گروه داریم یا یک تا
                 lines = scenario_text.split('\n')
-                bot_count = sum(1 for line in lines if line.strip().startswith('@'))
+
+                def _has_target(line):
+                    s = line.strip()
+                    return s.startswith('@') or 't.me/' in s or (s.startswith('+') and len(s) > 5)
+
+                bot_count = sum(1 for line in lines if _has_target(line))
                 
                 if bot_count == 0:
                     await event.respond(
-                        "❌ سناریو باید با یوزرنیم ربات شروع شود! (مثال: @bot_name)",
+                        "❌ سناریو باید با آدرس ربات/گروه شروع شود!\n\n"
+                        "مثال‌ها:\n`@bot_name`\n`https://t.me/+hashcode`",
                         buttons=Button.inline("❌ لغو", b"cancel")
                     )
                     return
@@ -5036,9 +5056,11 @@ class BotHandler:
                             )
                 
                 else:
-                    # یک ربات (روش قبلی)
-                    bot_username = lines[0].strip().lstrip('@')
-                    scenario_commands = '\n'.join(lines[1:])
+                    # یک ربات/گروه (روش قبلی)
+                    # اولین خط می‌تونه @username یا لینک خصوصی باشه
+                    first_target = next((l.strip() for l in lines if _has_target(l)), '')
+                    bot_username = first_target  # کامل پاس بده، execute_scenario parse می‌کنه
+                    scenario_commands = '\n'.join(l for l in lines if not _has_target(l))
                     
                     # تجزیه سناریو
                     scenario = self.bot_automation.parse_scenario(scenario_commands)

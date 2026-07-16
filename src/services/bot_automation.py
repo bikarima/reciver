@@ -156,17 +156,37 @@ class BotAutomation:
                     'invalid_session': True
                 }
             
-            # حذف @ از یوزرنیم
-            bot_username = bot_username.lstrip('@')
-            
-            # دریافت entity ربات
+            # حذف @ از یوزرنیم — یا لینک خصوصی t.me/+hash
+            bot_username = bot_username.strip()
+            if bot_username.startswith('@'):
+                bot_username = bot_username[1:]
+
+            # دریافت entity ربات/گروه
             try:
-                bot = await client.get_entity(bot_username)
+                # لینک خصوصی: https://t.me/+HASH یا https://t.me/joinchat/HASH
+                if 't.me/+' in bot_username or 't.me/joinchat/' in bot_username or \
+                   (bot_username.startswith('+') and len(bot_username) > 5):
+                    from telethon.tl.functions.messages import CheckChatInviteRequest
+                    if 't.me/+' in bot_username:
+                        hash_part = bot_username.split('t.me/+')[-1].strip('/')
+                    elif 't.me/joinchat/' in bot_username:
+                        hash_part = bot_username.split('t.me/joinchat/')[-1].strip('/')
+                    else:
+                        hash_part = bot_username.lstrip('+')
+                    invite = await client(CheckChatInviteRequest(hash_part))
+                    if hasattr(invite, 'chat'):
+                        bot = invite.chat
+                    elif hasattr(invite, 'chats') and invite.chats:
+                        bot = invite.chats[0]
+                    else:
+                        raise Exception("گروه از لینک خصوصی پیدا نشد")
+                else:
+                    bot = await client.get_entity(bot_username)
             except Exception as e:
-                logger.error(f"خطا در پیدا کردن ربات: {e}")
+                logger.error(f"خطا در پیدا کردن ربات/گروه: {e}")
                 return {
                     'success': False,
-                    'message': f'ربات @{bot_username} پیدا نشد'
+                    'message': f'ربات/گروه پیدا نشد: {str(e)[:50]}'
                 }
             
             logger.info(f"شروع اجرای سناریو برای @{bot_username}")
